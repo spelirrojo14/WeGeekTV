@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
-import { movies as initialMovies, type Movie } from './data/movies'
-import MovieCard from './components/MovieCard'
 import { buscarPeliculas } from './tmdb'
 import Auth from './components/Auth'
 import { supabase } from './lib/supabase'
@@ -475,9 +473,8 @@ function App() {
   const [amigosActuales, setAmigosActuales] = useState<string[]>([])
   const [solicitudesEnviadas, setSolicitudesEnviadas] = useState<string[]>([])
   const [busqueda, setBusqueda] = useState('')
-  const [filtro, setFiltro] = useState<'todas' | 'vistas' | 'pendientes' | 'favoritas'>('todas')
+  const [filtro, setFiltro] = useState<'vistas' | 'favoritas'>('favoritas')
   const [tipoColeccion, setTipoColeccion] = useState<'peliculas' | 'series'>('peliculas')
-  const [peliculas, setPeliculas] = useState<Movie[]>(initialMovies)
   const [resultadosTMDB, setResultadosTMDB] = useState<TmdbMovie[]>([])
   const [buscandoTMDB, setBuscandoTMDB] = useState(false)
   const [errorTMDB, setErrorTMDB] = useState('')
@@ -612,14 +609,43 @@ console.log(
     return
   }
 
-  const series: TmdbSeries[] = (data ?? []).map((serie) => ({
-    id: serie.serie_id,
-    name: serie.name,
-    poster_path: serie.poster_path,
-    first_air_date: serie.first_air_date,
-    vote_average: serie.vote_average ?? 0,
-    tiempoTotal: serie.duracion ?? 0,
-  }))
+  const apiKey = import.meta.env.VITE_TMDB_API_KEY
+  const series: TmdbSeries[] = await Promise.all(
+    (data ?? []).map(async (serie) => {
+      let firstAirDate = serie.first_air_date ?? ''
+
+      if (!firstAirDate && apiKey) {
+        try {
+          const respuesta = await fetch(
+            `https://api.themoviedb.org/3/tv/${serie.serie_id}?api_key=${apiKey}&language=es-ES`,
+          )
+          if (respuesta.ok) {
+            const datosTMDB: TmdbSeriesDetails = await respuesta.json()
+            firstAirDate = datosTMDB.first_air_date ?? ''
+
+            if (firstAirDate) {
+              await supabase
+                .from('user_series')
+                .update({ first_air_date: firstAirDate })
+                .eq('user_id', session.user.id)
+                .eq('serie_id', serie.serie_id)
+            }
+          }
+        } catch (error) {
+          console.error(`No se pudo recuperar el año de ${serie.name}:`, error)
+        }
+      }
+
+      return {
+        id: serie.serie_id,
+        name: serie.name,
+        poster_path: serie.poster_path,
+        first_air_date: firstAirDate,
+        vote_average: serie.vote_average ?? 0,
+        tiempoTotal: serie.duracion ?? 0,
+      }
+    }),
+  )
 
   setFavoritasSeriesTMDB(
     series.filter((serie) =>
@@ -707,7 +733,7 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
 
     const { data: serieGuardada, error: errorBusqueda } = await supabase
       .from('user_series')
-      .select('id, favorita')
+      .select('id, favorita, first_air_date')
       .eq('user_id', session.user.id)
       .eq('serie_id', serie.id)
       .maybeSingle()
@@ -720,7 +746,11 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
     if (serieGuardada) {
       const { error } = await supabase
         .from('user_series')
-        .update({ vista: true, duracion: tiempoTotal })
+        .update({
+        vista: true,
+        duracion: tiempoTotal,
+        ...(serie.first_air_date ? { first_air_date: serie.first_air_date } : {}),
+      })
         .eq('id', serieGuardada.id)
       if (error) console.error('Error al marcar la serie como vista:', error)
     } else {
@@ -747,7 +777,7 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
 
   const { data: serieGuardada, error: errorBusqueda } = await supabase
     .from('user_series')
-    .select('id, favorita')
+    .select('id, favorita, first_air_date')
     .eq('user_id', session.user.id)
     .eq('serie_id', serie.id)
     .maybeSingle()
@@ -958,22 +988,6 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
   const volverAmigos = () => {
     setAmigoSeleccionado(null)
     setPagina('amigos')
-  }
-
-  const cambiarVista = (id: number) => {
-    setPeliculas(
-      peliculas.map((pelicula) =>
-        pelicula.id === id ? { ...pelicula, watched: !pelicula.watched } : pelicula,
-      ),
-    )
-  }
-
-  const cambiarFavorito = (id: number) => {
-    setPeliculas(
-      peliculas.map((pelicula) =>
-        pelicula.id === id ? { ...pelicula, favorite: !pelicula.favorite } : pelicula,
-      ),
-    )
   }
 
   const cambiarFavoritoTMDB = async (pelicula: TmdbMovie) => {
@@ -1188,6 +1202,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
       .from('user_series')
       .update({
         favorita: nuevaFavorita,
+        ...(serie.first_air_date ? { first_air_date: serie.first_air_date } : {}),
       })
       .eq('id', serieGuardada.id)
 
@@ -1205,6 +1220,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
       serie_id: serie.id,
       name: serie.name,
       poster_path: serie.poster_path,
+      first_air_date: serie.first_air_date ?? null,
       vote_average: serie.vote_average,
       favorita: true,
       vista: false,
@@ -1306,7 +1322,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
 
       const { data: serieGuardada, error: errorBusqueda } = await supabase
         .from('user_series')
-        .select('id, favorita')
+        .select('id, favorita, first_air_date')
         .eq('user_id', session.user.id)
         .eq('serie_id', serie.id)
         .maybeSingle()
@@ -1352,7 +1368,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
 
     const { data: serieGuardada, error: errorBusqueda } = await supabase
       .from('user_series')
-      .select('id, favorita')
+      .select('id, favorita, first_air_date')
       .eq('user_id', session.user.id)
       .eq('serie_id', serie.id)
       .maybeSingle()
@@ -1365,7 +1381,11 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
     if (serieGuardada) {
       const { error } = await supabase
         .from('user_series')
-        .update({ vista: true, duracion: tiempoTotal })
+        .update({
+        vista: true,
+        duracion: tiempoTotal,
+        ...(serie.first_air_date ? { first_air_date: serie.first_air_date } : {}),
+      })
         .eq('id', serieGuardada.id)
       if (error) console.error('Error al marcar la serie como vista:', error)
       return
@@ -1376,6 +1396,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
       serie_id: serie.id,
       name: serie.name,
       poster_path: serie.poster_path,
+      first_air_date: serie.first_air_date ?? null,
       vote_average: serie.vote_average,
       favorita: false,
       vista: true,
@@ -1650,17 +1671,6 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
     setPagina('peliculas')
   }
 
-  const peliculasFiltradas = peliculas.filter((pelicula) => {
-    const coincideBusqueda = pelicula.title.toLowerCase().includes(busqueda.toLowerCase())
-
-    if (!coincideBusqueda) return false
-    if (filtro === 'vistas') return pelicula.watched
-    if (filtro === 'pendientes') return !pelicula.watched
-    if (filtro === 'favoritas') return pelicula.favorite
-    return true
-  })
-
-  
 
   const tmdbFavoritas = favoritasTMDB
   const tmdbVistas = vistasTMDB
@@ -1791,21 +1801,40 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
   }, [episodiosVistos, vistasTMDB, vistasSeriesTMDB])
 
   useEffect(() => {
-    if (!session) return
+    if (!session?.user?.id) return
 
     try {
-      const unlockedKey = 'wegeektv_logros_desbloqueados'
-      const notifiedKey = 'wegeektv_logros_notificados'
+      const userId = session.user.id
+      const unlockedKey = `wegeektv_logros_desbloqueados_${userId}`
+      const notifiedKey = `wegeektv_logros_notificados_${userId}`
+      const initializedKey = `wegeektv_logros_inicializados_${userId}`
 
       const previous: Record<string, number> = JSON.parse(localStorage.getItem(unlockedKey) || '{}')
       const notified: Record<string, number> = JSON.parse(localStorage.getItem(notifiedKey) || '{}')
+      const initialized = localStorage.getItem(initializedKey) === '1'
+
+      // Esperamos a que haya datos reales antes de crear la línea base.
+      // Así no aparecen ventanas al cargar una cuenta que ya tenía logros.
+      if (!initialized) {
+        const hayDatos = logrosCalculados.some((achievement) => achievement.value > 0)
+        if (!hayDatos) return
+
+        const baseline: Record<string, number> = {}
+        for (const achievement of logrosCalculados) {
+          baseline[String(achievement.id)] = Math.max(0, achievement.tierIndex + 1)
+        }
+        localStorage.setItem(unlockedKey, JSON.stringify(baseline))
+        localStorage.setItem(notifiedKey, JSON.stringify(baseline))
+        localStorage.setItem(initializedKey, '1')
+        return
+      }
 
       const next = { ...previous }
       const nextNotified = { ...notified }
       const nuevos: AchievementProgress[] = []
 
       for (const achievement of logrosCalculados) {
-        const currentLevel = achievement.tierIndex + 1
+        const currentLevel = Math.max(0, achievement.tierIndex + 1)
         const oldLevel = previous[String(achievement.id)] ?? 0
         const oldNotifiedLevel = notified[String(achievement.id)] ?? 0
 
@@ -1813,9 +1842,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
           next[String(achievement.id)] = currentLevel
         }
 
-        // Solo mostramos la categoría que se acaba de alcanzar.
-        // Así no se genera una cola interminable si ya había varios logros pendientes.
-        if (currentLevel > 0 && currentLevel > oldNotifiedLevel) {
+        if (currentLevel > oldNotifiedLevel) {
           nuevos.push({ ...achievement, tierIndex: currentLevel - 1 })
           nextNotified[String(achievement.id)] = currentLevel
         }
@@ -3036,33 +3063,6 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                   </div>
                 </section>
               </>
-            )}
-
-            <div className="movie-filters netflix-filters">
-              <button className={filtro === 'todas' ? 'filter-active' : ''} onClick={() => setFiltro('todas')}>Todas</button>
-              <button className={filtro === 'vistas' ? 'filter-active' : ''} onClick={() => setFiltro('vistas')}>Vistas</button>
-              <button className={filtro === 'pendientes' ? 'filter-active' : ''} onClick={() => setFiltro('pendientes')}>Pendientes</button>
-              <button className={filtro === 'favoritas' ? 'filter-active' : ''} onClick={() => setFiltro('favoritas')}>Favoritas</button>
-            </div>
-
-            {filtro !== 'todas' && !busqueda.trim() && (
-              <section className="netflix-catalog-section filtered-library-section">
-                <div className="netflix-section-heading">
-                  <div>
-                    <span className="section-kicker">MI COLECCIÓN</span>
-                    <h2>{filtro === 'vistas' ? 'Películas vistas' : filtro === 'pendientes' ? 'Películas pendientes' : 'Mis favoritas'}</h2>
-                  </div>
-                  <span className="movie-count">{peliculasFiltradas.length} películas</span>
-                </div>
-                <div className="movie-grid">
-                  {peliculasFiltradas.map((pelicula) => (
-                    <MovieCard key={pelicula.id} pelicula={pelicula} cambiarVista={cambiarVista} cambiarFavorito={cambiarFavorito} />
-                  ))}
-                </div>
-                {peliculasFiltradas.length === 0 && (
-                  <div className="catalog-empty">Todavía no hay películas en este apartado.</div>
-                )}
-              </section>
             )}
 
             <p className="tmdb-disclaimer">
