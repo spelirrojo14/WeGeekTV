@@ -670,18 +670,10 @@ console.log(
 
   const [vistasSeriesTMDB, setVistasSeriesTMDB] = useState<TmdbSeries[]>([])
 
-  // Episodios vistos agrupados por serie. Se persisten para que las estadísticas
-  // sigan siendo correctas después de cerrar o refrescar la web.
-  const [episodiosVistos, setEpisodiosVistos] = useState<EpisodiosVistosPorSerie>(() => {
-    try {
-      const guardados = localStorage.getItem('wegeektv_episodios_vistos')
-      if (!guardados) return {}
-      const datos = JSON.parse(guardados)
-      return datos && typeof datos === 'object' && !Array.isArray(datos) ? datos : {}
-    } catch {
-      return {}
-    }
-  })
+  // Los episodios se guardan de forma permanente en Supabase.
+  // localStorage se mantiene como copia local para evitar perder datos durante
+  // la migración inicial y como respaldo visual si Supabase tarda en responder.
+  const [episodiosVistos, setEpisodiosVistos] = useState<EpisodiosVistosPorSerie>({})
   const [episodiosTemporada, setEpisodiosTemporada] = useState<TmdbEpisode[]>([])
   const [temporadaSeleccionada, setTemporadaSeleccionada] = useState<number | null>(null)
   const [logrosNotificacion, setLogrosNotificacion] = useState<AchievementProgress[]>([])
@@ -707,8 +699,248 @@ const cargarEpisodiosTemporada = async (temporada: number) => {
   }
 }
 
+const guardarEpisodiosEnSupabase = async (serieId: number, episodios: TmdbEpisode[]) => {
+  if (!session?.user?.id) return false
+
+  // La tabla actual no necesita almacenar toda la información de TMDB: solo
+  // usuario + serie + temporada + episodio + fecha.
+  const { error: errorBorrado } = await supabase
+    .from('user_series_episodes')
+    .delete()
+    .eq('user_id', session.user.id)
+    .eq('serie_id', serieId)
+
+  if (errorBorrado) {
+    console.error('Error limpiando episodios de Supabase:', errorBorrado)
+    return false
+  }
+
+  if (episodios.length === 0) return true
+
+  const filas = episodios.map((episodio) => ({
+    user_id: session.user.id,
+    serie_id: serieId,
+    season_number: episodio.season_number,
+    episode_number: episodio.episode_number,
+    watched_at: new Date().toISOString(),
+  }))
+
+  const { error: errorInsert } = await supabase
+    .from('user_series_episodes')
+    .insert(filas)
+
+  if (errorInsert) {
+    console.error('Error guardando episodios en Supabase:', errorInsert)
+    return false
+  }
+
+  return true
+}
+
+const cargarEpisodiosVistosDesdeSupabase = async () => {
+  if (!session?.user?.id) return
+
+  const { data, error } = await supabase
+    .from('user_series_episodes')
+    .select('serie_id, season_number, episode_number, watched_at')
+    .eq('user_id', session.user.id)
+
+  if (error) {
+    console.error('Error cargando episodios vistos desde Supabase:', error)
+    return
+  }
+
+  const filas = data ?? []
+
+  // Sincronización de migración: NO exigimos que Supabase esté vacío.
+  // Si el usuario todavía tiene episodios en localStorage (por ejemplo, los
+  // 877 que tenía antes de pasar a Supabase), los fusionamos con los que ya
+  // existan en la base de datos y solo insertamos los que falten.
+  try {
+    const guardados = localStorage.getItem('wegeektv_episodios_vistos')
+    if (guardados) {
+      const locales = JSON.parse(guardados) as EpisodiosVistosPorSerie
+
+      if (locales && typeof locales === 'object' && !Array.isArray(locales)) {
+        const existentes = new Set(
+          filas.map(
+            (fila) =>
+              `${fila.serie_id}:${Number(fila.season_number)}:${Number(fila.episode_number)}`,
+          ),
+        )
+
+        const pendientes: Array<{
+          user_id: string
+          serie_id: number
+          season_number: number
+          episode_number: number
+          watched_at: string
+        }> = []
+
+        for (const [serieIdTexto, episodios] of Object.entries(locales)) {
+          const serieId = Number(serieIdTexto)
+          if (!Number.isFinite(serieId) || !Array.isArray(episodios)) continue
+
+          for (const episodio of episodios) {
+            const seasonNumber = Number(episodio?.season_number)
+            const episodeNumber = Number(episodio?.episode_number)
+            if (!Number.isFinite(seasonNumber) || !Number.isFinite(episodeNumber)) continue
+
+            const clave = `${serieId}:${seasonNumber}:${episodeNumber}`
+            if (existentes.has(clave)) continue
+
+            existentes.add(clave)
+            pendientes.push({
+              user_id: session.user.id,
+              serie_id: serieId,
+              season_number: seasonNumber,
+              episode_number: episodeNumber,
+              watched_at: new Date().toISOString(),
+            })
+          }
+        }
+
+        // Insertamos por lotes para evitar lanzar cientos de peticiones a la vez
+        // y para que una petición grande no haga que la migración se corte a mitad.
+        const TAMANO_LOTE = 50
+        for (let i = 0; i < pendientes.length; i += TAMANO_LOTE) {
+          const lote = pendientes.slice(i, i + TAMANO_LOTE)
+          const { data: insertados, error: errorLote } = await supabase
+            .from('user_series_episodes')
+            .insert(lote)
+            .select('serie_id, season_number, episode_number, watched_at')
+
+          if (errorLote) {
+            console.error(
+              `Error migrando lote de episodios (${i + 1}-${Math.min(i + TAMANO_LOTE, pendientes.length)}):`,
+              errorLote,
+            )
+            // No seguimos machacando la base de datos si un lote falla.
+            // Los siguientes arranques volverán a intentar solo lo que falte.
+            break
+          }
+
+          filas.push(...(insertados ?? lote))
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error migrando episodios locales a Supabase:', error)
+  }
+
+  // Importante: si localStorage contiene más episodios que Supabase, NO lo
+  // sobrescribimos con una versión incompleta. Supabase pasa a ser la fuente
+  // principal cuando ya está sincronizada, pero durante la migración conservamos
+  // cualquier dato local adicional para que pueda volver a intentarse.
+
+
+  const porSerie: Record<string, { season_number: number; episode_number: number }[]> = {}
+  for (const fila of filas) {
+    const clave = String(fila.serie_id)
+    if (!porSerie[clave]) porSerie[clave] = []
+    porSerie[clave].push({
+      season_number: Number(fila.season_number),
+      episode_number: Number(fila.episode_number),
+    })
+  }
+
+  const reconstruidos: EpisodiosVistosPorSerie = {}
+  const apiKey = import.meta.env.VITE_TMDB_API_KEY
+  if (!apiKey) return
+
+  await Promise.all(
+    Object.entries(porSerie).map(async ([serieIdTexto, episodiosGuardados]) => {
+      const serieId = Number(serieIdTexto)
+      const temporadas = [...new Set(episodiosGuardados.map((episodio) => episodio.season_number))]
+      const episodiosTMDB: TmdbEpisode[] = []
+
+      await Promise.all(
+        temporadas.map(async (temporada) => {
+          try {
+            const respuesta = await fetch(
+              `https://api.themoviedb.org/3/tv/${serieId}/season/${temporada}?api_key=${apiKey}&language=es-ES`,
+            )
+            if (!respuesta.ok) return
+            const datos = await respuesta.json()
+            if (Array.isArray(datos.episodes)) episodiosTMDB.push(...(datos.episodes as TmdbEpisode[]))
+          } catch (error) {
+            console.error(`No se pudieron reconstruir los episodios de la serie ${serieId}:`, error)
+          }
+        }),
+      )
+
+      const vistos = episodiosGuardados
+        .map((guardado) =>
+          episodiosTMDB.find(
+            (episodio) =>
+              episodio.season_number === guardado.season_number &&
+              episodio.episode_number === guardado.episode_number,
+          ),
+        )
+        .filter((episodio): episodio is TmdbEpisode => Boolean(episodio))
+
+      if (vistos.length > 0) reconstruidos[serieIdTexto] = vistos
+    }),
+  )
+
+  // Conservamos cualquier dato local que todavía no haya podido reconstruirse
+  // desde TMDB/Supabase. Así una migración parcial nunca destruye episodios
+  // antiguos que siguen guardados en este navegador.
+  let estadoFinal = reconstruidos
+  try {
+    const guardadosActuales = localStorage.getItem('wegeektv_episodios_vistos')
+    if (guardadosActuales) {
+      const localesActuales = JSON.parse(guardadosActuales) as EpisodiosVistosPorSerie
+      if (localesActuales && typeof localesActuales === 'object' && !Array.isArray(localesActuales)) {
+        const fusionados: EpisodiosVistosPorSerie = { ...reconstruidos }
+
+        for (const [serieIdTexto, episodiosLocales] of Object.entries(localesActuales)) {
+          if (!Array.isArray(episodiosLocales)) continue
+          const existentes = fusionados[serieIdTexto] ?? []
+          const claves = new Set(
+            existentes.map(
+              (episodio) => `${episodio.season_number}:${episodio.episode_number}`,
+            ),
+          )
+
+          for (const episodio of episodiosLocales) {
+            const clave = `${episodio.season_number}:${episodio.episode_number}`
+            if (!claves.has(clave)) {
+              existentes.push(episodio)
+              claves.add(clave)
+            }
+          }
+
+          if (existentes.length > 0) fusionados[serieIdTexto] = existentes
+        }
+
+        estadoFinal = fusionados
+      }
+    }
+  } catch (error) {
+    console.error('No se pudieron conservar los episodios locales durante la sincronización:', error)
+  }
+
+  setEpisodiosVistos(estadoFinal)
+  localStorage.setItem('wegeektv_episodios_vistos', JSON.stringify(estadoFinal))
+}
+
+useEffect(() => {
+  if (!session?.user?.id) {
+    setEpisodiosVistos({})
+    return
+  }
+
+  cargarEpisodiosVistosDesdeSupabase()
+}, [session?.user?.id])
+
 const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episodios: TmdbEpisode[]) => {
   if (!session) return
+
+  // Primero sincronizamos siempre los episodios. Antes esta función podía salir
+  // demasiado pronto y nunca llegaban a user_series_episodes.
+  const episodiosGuardados = await guardarEpisodiosEnSupabase(serie.id, episodios)
+  if (!episodiosGuardados) return
 
   const totalEpisodios = serie.number_of_episodes || 0
   const serieCompleta = totalEpisodios > 0 && episodios.length >= totalEpisodios
@@ -1320,6 +1552,8 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
         return nuevas
       })
 
+      await guardarEpisodiosEnSupabase(serie.id, [])
+
       const { data: serieGuardada, error: errorBusqueda } = await supabase
         .from('user_series')
         .select('id, favorita, first_air_date')
@@ -1365,6 +1599,8 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
       localStorage.setItem('wegeektv_episodios_vistos', JSON.stringify(nuevas))
       return nuevas
     })
+
+    await guardarEpisodiosEnSupabase(serie.id, todosLosEpisodios)
 
     const { data: serieGuardada, error: errorBusqueda } = await supabase
       .from('user_series')
