@@ -869,15 +869,32 @@ const cargarEpisodiosVistosDesdeSupabase = async () => {
         }),
       )
 
-      const vistos = episodiosGuardados
-        .map((guardado) =>
-          episodiosTMDB.find(
-            (episodio) =>
-              episodio.season_number === guardado.season_number &&
-              episodio.episode_number === guardado.episode_number,
-          ),
+      // MUY IMPORTANTE: Supabase es la fuente de verdad de los episodios vistos.
+      // TMDB solo aporta los datos visuales del episodio. Si TMDB no devuelve
+      // alguno de los episodios guardados (por cambios de catálogo, idioma,
+      // errores temporales, especiales, etc.), NO lo descartamos. Creamos un
+      // registro mínimo con temporada/episodio para conservar el visto.
+      const vistos: TmdbEpisode[] = episodiosGuardados.map((guardado) => {
+        const encontrado = episodiosTMDB.find(
+          (episodio) =>
+            episodio.season_number === guardado.season_number &&
+            episodio.episode_number === guardado.episode_number,
         )
-        .filter((episodio): episodio is TmdbEpisode => Boolean(episodio))
+
+        if (encontrado) return encontrado
+
+        // ID sintético estable. Solo se usa para mantener el episodio en el
+        // estado local cuando TMDB no lo devuelve; nunca se escribe en Supabase.
+        const idSintetico = -(serieId * 100000 + guardado.season_number * 1000 + guardado.episode_number)
+        return {
+          id: idSintetico,
+          name: `Episodio ${guardado.episode_number}`,
+          season_number: guardado.season_number,
+          episode_number: guardado.episode_number,
+          overview: '',
+          still_path: null,
+        }
+      })
 
       if (vistos.length > 0) reconstruidos[serieIdTexto] = vistos
     }),
