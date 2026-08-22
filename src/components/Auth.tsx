@@ -17,32 +17,21 @@ export default function Auth() {
 
     if (isRegistering) {
       // REGISTRO
-      const { data, error } = await supabase.auth.signUp({
+      const { error } = await supabase.auth.signUp({
         email,
         password,
+        options: {
+          data: {
+            username,
+            display_name: username,
+          },
+        },
       })
 
       if (error) {
         setMessage(error.message)
         setLoading(false)
         return
-      }
-
-      // Crear el perfil en nuestra tabla profiles
-      if (data.user) {
-        const { error: profileError } = await supabase
-          .from('profiles')
-          .insert({
-            id: data.user.id,
-            username,
-            display_name: username,
-          })
-
-        if (profileError) {
-          setMessage(profileError.message)
-          setLoading(false)
-          return
-        }
       }
 
       setMessage(
