@@ -21,6 +21,78 @@ type Friend = {
   lastSeenAt?: string | null
 }
 
+type FriendProfileData = {
+  profile: { id: string; username?: string | null; display_name?: string | null; avatar_url?: string | null }
+  movies: TmdbMovie[]
+  series: TmdbSeries[]
+  episodes: EpisodiosVistosPorSerie
+  achievements: AchievementProgress[]
+}
+
+function calcularLogrosDeColeccion(
+  peliculas: TmdbMovie[],
+  series: TmdbSeries[],
+  episodiosVistosPorSerie: EpisodiosVistosPorSerie,
+): AchievementProgress[] {
+  const episodiosTotalesVistos = Object.values(episodiosVistosPorSerie).reduce(
+    (total, episodios) => total + (Array.isArray(episodios) ? episodios.length : 0),
+    0,
+  )
+  const minutosPeliculas = peliculas.reduce((total, pelicula) => total + (pelicula.runtime || 0), 0)
+  const minutosSeriesPorEpisodios = Object.values(episodiosVistosPorSerie).reduce(
+    (total, episodios) => total + (Array.isArray(episodios) ? episodios.reduce((subtotal, episodio) => subtotal + (episodio.runtime || 0), 0) : 0),
+    0,
+  )
+  const minutosSeriesCompletas = series.reduce((total, serie) => {
+    const episodios = episodiosVistosPorSerie[String(serie.id)] || []
+    const tieneDuracionesDeEpisodio = episodios.some((episodio) => typeof episodio.runtime === 'number' && episodio.runtime > 0)
+    return !tieneDuracionesDeEpisodio ? total + (serie.tiempoTotal || 0) : total
+  }, 0)
+  const minutosSeries = minutosSeriesPorEpisodios + minutosSeriesCompletas
+  const horasTotales = (minutosPeliculas + minutosSeries) / 60
+  const mesesInvertidos = horasTotales / (24 * 30)
+  const movieGenreCount = (ids: number[]) => peliculas.filter((movie) => (movie.genres ?? []).some((genre) => ids.includes(genre.id))).length
+  const seriesGenreCount = (ids: number[]) => series.filter((serie) => (serie.genres ?? []).some((genre) => ids.includes(genre.id))).length
+  const yearCount = (type: 'classic' | 'modern' | 'current') => peliculas.filter((movie) => {
+    const year = Number(movie.release_date?.slice(0, 4))
+    if (!year) return false
+    if (type === 'classic') return year < 1970
+    if (type === 'modern') return year >= 1970 && year <= 1999
+    return year >= 2000
+  }).length
+  const values: Record<number, number> = {
+    1: peliculas.length,
+    2: series.length,
+    3: episodiosTotalesVistos,
+    22: yearCount('classic'),
+    23: yearCount('modern'),
+    24: yearCount('current'),
+    25: mesesInvertidos,
+  }
+  ACHIEVEMENTS.forEach((achievement) => {
+    if (achievement.movieGenre) values[achievement.id] = movieGenreCount(achievement.movieGenre)
+    if (achievement.seriesGenre) values[achievement.id] = seriesGenreCount(achievement.seriesGenre)
+  })
+  for (const achievement of ACHIEVEMENTS.filter((item) => item.meta)) {
+    const niveles = (achievement.meta ?? []).map((id) => {
+      const origen = ACHIEVEMENTS.find((item) => item.id === id)
+      return achievementTier(values[id] ?? 0, origen?.thresholds ?? [])
+    })
+    values[achievement.id] = niveles.length ? Math.max(0, Math.min(...niveles) + 1) : 0
+  }
+  return ACHIEVEMENTS.map((achievement) => {
+    const value = values[achievement.id] ?? 0
+    const tierIndex = achievementTier(value, achievement.thresholds)
+    const nextThreshold = achievement.thresholds.find((threshold) => value < threshold) ?? null
+    const previousThreshold = tierIndex >= 0 ? achievement.thresholds[tierIndex] : 0
+    const target = nextThreshold ?? achievement.thresholds[achievement.thresholds.length - 1]
+    const percent = tierIndex === achievement.thresholds.length - 1
+      ? 100
+      : Math.max(0, Math.min(100, ((value - previousThreshold) / Math.max(1, target - previousThreshold)) * 100))
+    return { id: achievement.id, name: achievement.name, icon: achievement.icon, description: achievement.description, value, thresholds: achievement.thresholds, tierIndex, nextThreshold, percent, completed: tierIndex === achievement.thresholds.length - 1 }
+  })
+}
+
 type TmdbMovie = {
   id: number
   title: string
@@ -464,10 +536,15 @@ function App() {
   }, [session])
   const [pagina, setPagina] = useState('inicio')
   const [amigoSeleccionado, setAmigoSeleccionado] = useState<Friend | null>(null)
+  const [amigoPerfilData, setAmigoPerfilData] = useState<FriendProfileData | null>(null)
+  const [cargandoPerfilAmigo, setCargandoPerfilAmigo] = useState(false)
+  const [errorPerfilAmigo, setErrorPerfilAmigo] = useState('')
   const [nombreUsuario, setNombreUsuario] = useState('Usuario')
   const [avatarUsuario, setAvatarUsuario] = useState('👤')
   const [editandoPerfil, setEditandoPerfil] = useState(false)
   const [busquedaAmigos, setBusquedaAmigos] = useState('')
+  const [usuariosBusqueda, setUsuariosBusqueda] = useState<Friend[]>([])
+  const [buscandoUsuarios, setBuscandoUsuarios] = useState(false)
   const [friends, setFriends] = useState<Friend[]>(emptyFriends)
   const [solicitudesRecibidas, setSolicitudesRecibidas] = useState<string[]>([])
   const [amigosActuales, setAmigosActuales] = useState<string[]>([])
@@ -1123,24 +1200,25 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
       if (relacion.status === 'pending' && soySolicitante) enviadas.push(otroId)
     })
 
-    const convertirPerfil = async (id: string): Promise<Friend> => {
+    const cargarDatosPerfilAmigo = async (id: string): Promise<Friend> => {
       const perfil = perfilMap.get(id) ?? {}
-      const [{ data: peliculas }, { data: series }] = await Promise.all([
-        supabase.from('user_movies').select('*').eq('user_id', id),
-        supabase.from('user_series').select('*').eq('user_id', id),
-      ])
-      const peliculasVistas = (peliculas ?? []).filter((p: any) => p.vista === true || p.watched === true).length
-      const seriesVistas = (series ?? []).filter((s: any) => s.vista === true || s.watched === true).length
-      const favoritos = (peliculas ?? []).filter((p: any) => p.favorita === true || p.favorite === true).length + (series ?? []).filter((s: any) => s.favorita === true || s.favorite === true).length
+      const { data, error } = await supabase.rpc('get_friend_profile_data', { p_friend_id: id })
+      if (error) {
+        console.error('Error cargando los datos del amigo:', error)
+        return { id, name: perfil.display_name || perfil.username || 'Usuario', status: 'Ausente', watching: 'Explorando qué ver...', movies: 0, series: 0, favorites: 0, avatar: perfil.avatar_url || '👤' }
+      }
+      const resultado: any = data ?? {}
+      const perfilSeguro = resultado.profile ?? perfil
+      const stats = resultado.stats ?? {}
       return {
         id,
-        name: perfil.display_name || perfil.username || 'Usuario',
+        name: perfilSeguro.display_name || perfilSeguro.username || perfil.display_name || perfil.username || 'Usuario',
         status: 'Ausente',
-        watching: 'Nada indicado',
-        movies: peliculasVistas,
-        series: seriesVistas,
-        favorites: favoritos,
-        avatar: perfil.avatar_url || '👤',
+        watching: 'Explorando qué ver...',
+        movies: Number(stats.movies ?? 0),
+        series: Number(stats.series ?? 0),
+        favorites: Number(stats.favorites ?? 0),
+        avatar: perfilSeguro.avatar_url || perfil.avatar_url || '👤',
       }
     }
 
@@ -1148,12 +1226,71 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
     // convierten en usuarios visibles. No existe ninguna lista de amigos
     // hardcodeada ni datos de ejemplo.
     const idsVisibles = Array.from(new Set([...amigos, ...recibidas, ...enviadas]))
-    const perfilesConvertidos = await Promise.all(idsVisibles.map(convertirPerfil))
+    const perfilesConvertidos = await Promise.all(idsVisibles.map(cargarDatosPerfilAmigo))
     setFriends(perfilesConvertidos)
     setAmigosActuales(amigos)
     setSolicitudesRecibidas(recibidas)
     setSolicitudesEnviadas(enviadas)
   }
+
+  useEffect(() => {
+    if (!session?.user?.id) {
+      setUsuariosBusqueda([])
+      return
+    }
+
+    const termino = busquedaAmigos.trim()
+    if (termino.length < 2) {
+      setUsuariosBusqueda([])
+      setBuscandoUsuarios(false)
+      return
+    }
+
+    let cancelado = false
+    setBuscandoUsuarios(true)
+
+    const temporizador = window.setTimeout(async () => {
+      try {
+        const patron = `%${termino.replace(/[%_]/g, '')}%`
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('id, username, display_name, avatar_url')
+          .or(`username.ilike.${patron},display_name.ilike.${patron}`)
+          .neq('id', session.user.id)
+          .order('username', { ascending: true })
+          .limit(30)
+
+        if (error) {
+          console.error('Error buscando usuarios:', error)
+          if (!cancelado) setUsuariosBusqueda([])
+          return
+        }
+
+        const resultados: Friend[] = (data ?? []).map((perfil: any) => ({
+          id: perfil.id,
+          name: perfil.display_name || perfil.username || 'Usuario',
+          status: 'Ausente',
+          watching: 'Nada indicado',
+          movies: 0,
+          series: 0,
+          favorites: 0,
+          avatar: perfil.avatar_url || '👤',
+        }))
+
+        if (!cancelado) setUsuariosBusqueda(resultados)
+      } catch (error) {
+        console.error('Error inesperado buscando usuarios:', error)
+        if (!cancelado) setUsuariosBusqueda([])
+      } finally {
+        if (!cancelado) setBuscandoUsuarios(false)
+      }
+    }, 300)
+
+    return () => {
+      cancelado = true
+      window.clearTimeout(temporizador)
+    }
+  }, [busquedaAmigos, session?.user?.id])
 
   useEffect(() => {
     if (!session?.user?.id) return
@@ -1169,22 +1306,83 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
     cargarPerfilYAmigos()
   }, [session])
 
+  const enriquecerColeccionAmigo = async <T extends TmdbMovie | TmdbSeries>(items: T[], tipo: 'movie' | 'tv'): Promise<T[]> => {
+    const apiKey = import.meta.env.VITE_TMDB_API_KEY
+    if (!apiKey || items.length === 0) return items
+    const cacheKey = `wegeektv_friend_${tipo}_details_v1`
+    let cache: Record<string, any> = {}
+    try { cache = JSON.parse(localStorage.getItem(cacheKey) || '{}') } catch { cache = {} }
+    const salida = [...items]
+    let changed = false
+    const worker = async (index: number) => {
+      const item: any = salida[index]
+      const key = String(item.id)
+      if (cache[key]) { salida[index] = { ...item, ...cache[key] }; return }
+      try {
+        const response = await fetch(`https://api.themoviedb.org/3/${tipo}/${item.id}?api_key=${apiKey}&language=es-ES`)
+        if (!response.ok) return
+        const details = await response.json()
+        const extra = tipo === 'movie'
+          ? { runtime: details.runtime ?? item.runtime, genres: details.genres ?? item.genres ?? [], release_date: details.release_date || item.release_date }
+          : { genres: details.genres ?? item.genres ?? [], first_air_date: details.first_air_date || item.first_air_date, number_of_episodes: details.number_of_episodes, number_of_seasons: details.number_of_seasons }
+        cache[key] = extra
+        salida[index] = { ...item, ...extra }
+        changed = true
+      } catch (error) { console.warn('No se pudo enriquecer contenido del amigo:', item.id, error) }
+    }
+    for (let i = 0; i < salida.length; i += 6) await Promise.all(salida.slice(i, i + 6).map((_, offset) => worker(i + offset)))
+    if (changed) localStorage.setItem(cacheKey, JSON.stringify(cache))
+    return salida
+  }
+
   const abrirPerfil = async (amigo: Friend) => {
     setAmigoSeleccionado(amigo)
+    setAmigoPerfilData(null)
+    setErrorPerfilAmigo('')
+    setCargandoPerfilAmigo(true)
     setPagina('perfil')
-    const actualizado = await (async () => {
-      const perfil = await supabase.from('profiles').select('id, username, display_name, avatar_url').eq('id', amigo.id).maybeSingle()
-      const [{ data: peliculas }, { data: series }] = await Promise.all([
-        supabase.from('user_movies').select('*').eq('user_id', amigo.id),
-        supabase.from('user_series').select('*').eq('user_id', amigo.id),
-      ])
-      const pv = (peliculas ?? []).filter((p: any) => p.vista === true || p.watched === true).length
-      const sv = (series ?? []).filter((s: any) => s.vista === true || s.watched === true).length
-      const fav = (peliculas ?? []).filter((p: any) => p.favorita === true || p.favorite === true).length + (series ?? []).filter((s: any) => s.favorita === true || s.favorite === true).length
-      const pr: any = perfil.data ?? {}
-      return { ...amigo, name: pr.display_name || pr.username || amigo.name, avatar: pr.avatar_url || amigo.avatar, movies: pv, series: sv, favorites: fav }
-    })()
-    setAmigoSeleccionado(actualizado)
+
+    try {
+      const { data, error } = await supabase.rpc('get_friend_profile_data', { p_friend_id: amigo.id })
+      if (error) throw error
+
+      const resultado: any = data ?? {}
+      const perfil = resultado.profile ?? {}
+      const rawMovies = Array.isArray(resultado.movies) ? resultado.movies : []
+      const rawSeries = Array.isArray(resultado.series) ? resultado.series : []
+      const rawEpisodes = Array.isArray(resultado.episodes) ? resultado.episodes : []
+
+      const movies: TmdbMovie[] = rawMovies.map((movie: any) => ({
+        id: Number(movie.tmdb_id), title: movie.title || 'Película', poster_path: movie.poster_path || null,
+        release_date: movie.release_date || '', vote_average: Number(movie.vote_average || 0), runtime: Number(movie.runtime || 0) || undefined, genres: movie.genres || [],
+      }))
+      const series: TmdbSeries[] = rawSeries.map((serie: any) => ({
+        id: Number(serie.serie_id), name: serie.name || 'Serie', poster_path: serie.poster_path || null,
+        first_air_date: serie.first_air_date || '', vote_average: Number(serie.vote_average || 0), tiempoTotal: Number(serie.duracion || 0) || undefined, genres: serie.genres || [],
+      }))
+      const episodes: EpisodiosVistosPorSerie = {}
+      for (const fila of rawEpisodes) {
+        const serieId = String(fila.serie_id)
+        ;(episodes[serieId] ||= []).push({
+          id: Number(fila.episode_id || `${fila.serie_id}${fila.season_number}${fila.episode_number}`),
+          name: fila.name || `Episodio ${fila.episode_number}`, episode_number: Number(fila.episode_number), season_number: Number(fila.season_number),
+          runtime: Number(fila.runtime || 0) || undefined, air_date: fila.air_date || undefined, still_path: fila.still_path || null, overview: fila.overview || undefined,
+        })
+      }
+
+      const enrichedMovies = await enriquecerColeccionAmigo(movies, 'movie')
+      const enrichedSeries = await enriquecerColeccionAmigo(series, 'tv')
+      const achievements = calcularLogrosDeColeccion(enrichedMovies, enrichedSeries, episodes)
+      const favoritos = Number(resultado.stats?.favorites ?? 0)
+      const friend: Friend = { ...amigo, name: perfil.display_name || perfil.username || amigo.name, avatar: perfil.avatar_url || amigo.avatar, movies: enrichedMovies.length, series: enrichedSeries.length, favorites: favoritos }
+      setAmigoSeleccionado(friend)
+      setAmigoPerfilData({ profile: { ...perfil, id: amigo.id }, movies: enrichedMovies, series: enrichedSeries, episodes, achievements })
+    } catch (error: any) {
+      console.error('Error cargando el perfil del amigo:', error)
+      setErrorPerfilAmigo(error?.message || 'No se ha podido cargar el perfil del amigo.')
+    } finally {
+      setCargandoPerfilAmigo(false)
+    }
   }
 
   const enviarSolicitudAmistad = async (usuario: Friend) => {
@@ -4956,26 +5154,44 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
 
             {busquedaAmigos.trim() && (
               <section className="section" style={{ position:'relative', zIndex:1 }}>
-                <div className="section-title"><h2 style={{ fontSize:26 }}>🔎 Resultados de búsqueda</h2><span className="movie-count">{friends.filter((f) => f.name.toLowerCase().includes(busquedaAmigos.toLowerCase()) && f.id !== session?.user?.id).length}</span></div>
-                <div className="cards">
-                  {friends
-                    .filter((f) => f.name.toLowerCase().includes(busquedaAmigos.toLowerCase()) && f.id !== session?.user?.id)
-                    .map((usuario) => {
+                <div className="section-title"><h2 style={{ fontSize:26 }}>🔎 Resultados de búsqueda</h2><span className="movie-count">{usuariosBusqueda.length}</span></div>
+                {buscandoUsuarios ? (
+                  <div style={{ padding:'28px', textAlign:'center', borderRadius:24, background:'rgba(255,255,255,.035)', color:'rgba(255,255,255,.55)' }}>Buscando usuarios…</div>
+                ) : usuariosBusqueda.length > 0 ? (
+                  <div className="cards">
+                    {usuariosBusqueda.map((usuario) => {
                       const esAmigo = amigosActuales.includes(usuario.id)
                       const enviada = solicitudesEnviadas.includes(usuario.id)
+                      const recibida = solicitudesRecibidas.includes(usuario.id)
                       return (
-                        <div className="card" key={usuario.name} style={{ position:'relative', overflow:'hidden', borderRadius:24, background:'linear-gradient(145deg, rgba(255,78,202,.11), rgba(95,91,255,.08) 55%, rgba(255,255,255,.035))', border:'1px solid rgba(255,255,255,.11)', boxShadow:'0 18px 45px rgba(0,0,0,.2)' }}>
+                        <div className="card" key={usuario.id} style={{ position:'relative', overflow:'hidden', borderRadius:24, background:'linear-gradient(145deg, rgba(255,78,202,.11), rgba(95,91,255,.08) 55%, rgba(255,255,255,.035))', border:'1px solid rgba(255,255,255,.11)', boxShadow:'0 18px 45px rgba(0,0,0,.2)' }}>
                           <div style={{ position:'absolute', top:-35, right:-35, width:110, height:110, borderRadius:'50%', background:'rgba(255,86,208,.16)', filter:'blur(18px)' }} />
                           <div className="poster" style={{ position:'relative', zIndex:1, width:86, height:86, borderRadius:26, fontSize:40, display:'grid', placeItems:'center', margin:'0 auto 16px', background:'linear-gradient(135deg, rgba(255,255,255,.1), rgba(255,255,255,.035))', border:'1px solid rgba(255,255,255,.13)', boxShadow:'0 0 35px rgba(255,87,208,.14)' }}>{usuario.avatar}</div>
                           <h3 style={{ position:'relative', zIndex:1, fontSize:21 }}>{usuario.name}</h3>
-                          <p style={{ position:'relative', zIndex:1 }}>{esAmigo ? '🤝 Ya sois amigos' : enviada ? '⏳ Solicitud enviada' : 'Usuario de WeGeekTV'}</p>
-                          {!esAmigo && !enviada && (
+                          <p style={{ position:'relative', zIndex:1 }}>{esAmigo ? '🤝 Ya sois amigos' : enviada ? '⏳ Solicitud enviada' : recibida ? '📨 Te ha enviado una solicitud' : 'Usuario de WeGeekTV'}</p>
+                          {esAmigo ? (
+                            <button className="secondary" onClick={() => abrirPerfil(usuario)} style={{ position:'relative', zIndex:1, width:'100%' }}>👤 Ver perfil</button>
+                          ) : recibida ? (
+                            <div style={{ display:'flex', gap:8, position:'relative', zIndex:1 }}>
+                              <button className="primary" onClick={() => aceptarSolicitud(usuario.id)} style={{ flex:1 }}>✅ Aceptar</button>
+                              <button className="secondary" onClick={() => rechazarSolicitud(usuario.id)} style={{ flex:1 }}>Rechazar</button>
+                            </div>
+                          ) : enviada ? (
+                            <button className="secondary" disabled style={{ position:'relative', zIndex:1, width:'100%', opacity:.7 }}>⏳ Solicitud enviada</button>
+                          ) : (
                             <button className="primary" onClick={() => enviarSolicitudAmistad(usuario)} style={{ position:'relative', zIndex:1, width:'100%' }}>✨ Añadir amigo</button>
                           )}
                         </div>
                       )
                     })}
-                </div>
+                  </div>
+                ) : (
+                  <div style={{ padding:'34px 24px', textAlign:'center', borderRadius:24, background:'rgba(255,255,255,.035)', border:'1px solid rgba(255,255,255,.07)', color:'rgba(255,255,255,.55)' }}>
+                    <div style={{ fontSize:42, marginBottom:8 }}>🔍</div>
+                    <strong style={{ display:'block', color:'rgba(255,255,255,.85)', marginBottom:6 }}>No hemos encontrado a nadie</strong>
+                    <span>Prueba con otro nombre de usuario.</span>
+                  </div>
+                )}
               </section>
             )}
 
@@ -5152,80 +5368,76 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
         )}
 
         {pagina === 'perfil' && amigoSeleccionado && (
-          <section className="welcome">
-            <button className="secondary" onClick={volverAmigos}>
-              ← Volver a amigos
-            </button>
-
-            <p className="small-title">PERFIL</p>
-
-            <div className="profile-header">
-              <div className="big-avatar">{amigoSeleccionado.avatar}</div>
-
-              <div>
-                <h1>{amigoSeleccionado.name}</h1>
-                <p>
-                  <span
-                    style={{
-                      color: amigoSeleccionado.status === 'Online' ? '#4ade80' : '#aaa',
-                    }}
-                  >
-                    ● {amigoSeleccionado.status}
-                  </span>
-                </p>
-              </div>
-            </div>
-
-            <div className="stats">
-              <div className="stat">
-                <strong>{amigoSeleccionado.movies}</strong>
-                <span>Películas</span>
-              </div>
-
-              <div className="stat">
-                <strong>{amigoSeleccionado.series}</strong>
-                <span>Series</span>
-              </div>
-
-              <div className="stat">
-                <strong>{amigoSeleccionado.favorites}</strong>
-                <span>Favoritos ❤️</span>
-              </div>
-            </div>
-
-            <div className="currently-watching">
-              <p className="small-title">ESTÁ VIENDO AHORA</p>
-              <h2>📊 {amigoSeleccionado.movies} películas · 📺 {amigoSeleccionado.series} series · ❤️ {amigoSeleccionado.favorites} favoritos</h2>
-              <p>
-                Estos datos se cargan directamente desde la cuenta de tu amigo en WeGeekTV.
-              </p>
-            </div>
-
-            <section className="section">
-              <div className="section-title">
-                <h2>🎬 Últimas películas</h2>
-              </div>
-
-              <div className="cards">
-                <div className="card">
-                  <div className="poster">▣</div>
-                  <h3>Actividad de {amigoSeleccionado.name}</h3>
-                  <p>Perfil de amigo</p>
+          <section className="welcome" style={{ position:'relative', overflow:'hidden', paddingBottom:80 }}>
+            <div style={{ position:'absolute', inset:'-120px -20% auto', height:480, background:'radial-gradient(circle at 20% 30%,rgba(255,79,154,.22),transparent 32%),radial-gradient(circle at 75% 20%,rgba(101,91,255,.24),transparent 30%),radial-gradient(circle at 50% 80%,rgba(79,215,255,.12),transparent 30%)', filter:'blur(12px)', pointerEvents:'none' }} />
+            <div style={{ position:'relative', zIndex:1 }}>
+              <button className="secondary" onClick={volverAmigos}>← Volver a amigos</button>
+              {cargandoPerfilAmigo && (
+                <div style={{ marginTop:30, padding:50, textAlign:'center', borderRadius:30, background:'rgba(255,255,255,.04)', border:'1px solid rgba(255,255,255,.08)' }}>
+                  <div style={{ fontSize:48, marginBottom:12 }}>✦</div><h2>Cargando el universo de {amigoSeleccionado.name}…</h2><p style={{ opacity:.55 }}>Estamos recuperando su colección, series y logros.</p>
                 </div>
+              )}
+              {errorPerfilAmigo && !cargandoPerfilAmigo && (
+                <div style={{ marginTop:25, padding:24, borderRadius:22, background:'rgba(255,70,100,.08)', border:'1px solid rgba(255,70,100,.2)' }}><strong>No se ha podido cargar el perfil.</strong><p style={{ opacity:.65 }}>{errorPerfilAmigo}</p></div>
+              )}
+              {!cargandoPerfilAmigo && !errorPerfilAmigo && amigoPerfilData && (() => {
+                const data = amigoPerfilData
+                const logros = data.achievements
+                const conseguidos = logros.filter((a) => a.tierIndex >= 0).sort((a,b) => b.tierIndex - a.tierIndex || b.percent - a.percent)
+                const protagonista = conseguidos[0] || logros[0]
+                const diamantes = logros.filter((a) => a.tierIndex === 4).length
+                const episodiosAgrupados = Object.values(data.episodes) as TmdbEpisode[][]
+                const episodiosTotales = episodiosAgrupados.reduce((n, eps) => n + eps.length, 0)
+                const minutosPeliculas = data.movies.reduce((n,m) => n + (m.runtime || 0), 0)
+                const minutosEpisodios = episodiosAgrupados.reduce((n,eps) => n + eps.reduce((x,e) => x + (e.runtime || 0), 0), 0)
+                const horas = Math.floor((minutosPeliculas + minutosEpisodios) / 60)
+                return (
+                  <>
+                    <div style={{ marginTop:30, padding:'32px', borderRadius:34, background:'linear-gradient(135deg,rgba(255,255,255,.085),rgba(255,79,154,.09),rgba(90,94,255,.09))', border:'1px solid rgba(255,255,255,.13)', boxShadow:'0 25px 80px rgba(0,0,0,.25)' }}>
+                      <div style={{ display:'flex', gap:24, alignItems:'center', flexWrap:'wrap' }}>
+                        <div className="big-avatar" style={{ width:100, height:100, flex:'0 0 100px', fontSize:48 }}>{amigoSeleccionado.avatar}</div>
+                        <div style={{ flex:1, minWidth:220 }}><p className="small-title">PERFIL DE AMIGO</p><h1 style={{ margin:'4px 0', fontSize:'clamp(38px,6vw,70px)' }}>{amigoSeleccionado.name}</h1><span style={{ color:'#70f3a1', fontSize:12, fontWeight:800 }}>● MIEMBRO DE WEGEEKTV</span></div>
+                      </div>
+                      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))', gap:12, marginTop:28 }}>
+                        {[[data.movies.length,'🎬','Películas'],[data.series.length,'📺','Series'],[episodiosTotales,'▶️','Episodios'],[amigoSeleccionado.favorites,'❤️','Favoritos'],[conseguidos.length,'🏆','Logros'],[diamantes,'💎','Diamantes']].map(([value,icon,label]) => <div key={String(label)} style={{ padding:'16px 12px', borderRadius:19, background:'rgba(0,0,0,.18)', border:'1px solid rgba(255,255,255,.07)', textAlign:'center' }}><div style={{ fontSize:18 }}>{icon}</div><strong style={{ display:'block', fontSize:25, marginTop:5 }}>{value}</strong><span style={{ fontSize:9, opacity:.48, textTransform:'uppercase', letterSpacing:'.1em' }}>{label}</span></div>)}
+                      </div>
+                    </div>
 
-                <div className="card">
-                  <div className="poster">⭐</div>
-                  <h3>❤️ Favoritos</h3>
-                  <p>Añadida a favoritos</p>
-                </div>
+                    <section className="section" style={{ marginTop:28 }}>
+                      <div className="section-title"><h2>🏆 Su vitrina</h2><span className="movie-count">{conseguidos.length} conquistadas</span></div>
+                      {protagonista && protagonista.tierIndex >= 0 ? (
+                        <>
+                          <div style={{ display:'grid', gridTemplateColumns:'minmax(0,1.3fr) minmax(220px,.7fr)', gap:18, alignItems:'stretch' }}>
+                            <div style={{ minHeight:330, borderRadius:32, display:'grid', placeItems:'center', position:'relative', overflow:'hidden', background:`radial-gradient(circle,${ACHIEVEMENT_TIER_GLOWS[protagonista.tierIndex]},transparent 55%),rgba(255,255,255,.035)`, border:`1px solid ${ACHIEVEMENT_TIER_COLORS[protagonista.tierIndex]}55`, boxShadow:`0 0 60px ${ACHIEVEMENT_TIER_GLOWS[protagonista.tierIndex]}` }}>
+                              <div style={{ textAlign:'center' }}><div style={{ width:240, height:240, margin:'0 auto' }}><AchievementBadge achievement={protagonista} tierIndex={protagonista.tierIndex} size={240} effects /></div><h3 style={{ fontSize:24, margin:'-4px 0 4px' }}>{protagonista.name}</h3><span style={{ color:ACHIEVEMENT_TIER_COLORS[protagonista.tierIndex], fontWeight:900, textTransform:'uppercase', fontSize:11 }}>{ACHIEVEMENT_TIER_NAMES[protagonista.tierIndex]}</span></div>
+                            </div>
+                            <div style={{ display:'grid', gridTemplateRows:'repeat(3,1fr)', gap:12 }}>
+                              {[['🏆',conseguidos.length,'Logros desbloqueados'],['💎',diamantes,'Diamantes'],['⚡',`${Math.round(logros.reduce((n,a) => n + Math.max(0,a.tierIndex+1),0)/(logros.length*5)*100)}%`,'Progreso total']].map(([icon,value,label]) => <div key={String(label)} style={{ padding:22, borderRadius:24, background:'rgba(255,255,255,.045)', border:'1px solid rgba(255,255,255,.08)' }}><span style={{ fontSize:25 }}>{icon}</span><strong style={{ display:'block', fontSize:30, marginTop:8 }}>{value}</strong><span style={{ opacity:.48, fontSize:10, textTransform:'uppercase', letterSpacing:'.1em' }}>{label}</span></div>)}
+                            </div>
+                          </div>
+                          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:14, marginTop:18 }}>
+                            {conseguidos.map((logro) => <div key={logro.id} style={{ minHeight:240, position:'relative', borderRadius:26, overflow:'hidden', display:'grid', placeItems:'center', background:`radial-gradient(circle,${ACHIEVEMENT_TIER_GLOWS[logro.tierIndex]},transparent 55%),rgba(255,255,255,.035)`, border:`1px solid ${ACHIEVEMENT_TIER_COLORS[logro.tierIndex]}45` }}><div style={{ width:180, height:180 }}><AchievementBadge achievement={logro} tierIndex={logro.tierIndex} size={180} effects /></div><strong style={{ position:'absolute', bottom:13, left:10, right:10, textAlign:'center', fontSize:12, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{logro.name}</strong></div>)}
+                          </div>
+                        </>
+                      ) : <div style={{ padding:45, textAlign:'center', borderRadius:28, background:'rgba(255,255,255,.035)', border:'1px dashed rgba(255,255,255,.12)' }}><div style={{ fontSize:70 }}>🏆</div><h3>Aún no tiene medallas</h3><p style={{ opacity:.5 }}>Su vitrina está esperando la primera conquista.</p></div>}
+                    </section>
 
-                <div className="card">
-                  <div className="poster">🎞️</div>
-                  <h3>🎬 Películas vistas</h3>
-                  <p>Vista recientemente</p>
-                </div>
-              </div>
-            </section>
+                    <section className="section" style={{ marginTop:28 }}>
+                      <div className="section-title"><h2>🎬 Sus películas</h2><span className="movie-count">{data.movies.length}</span></div>
+                      {data.movies.length ? <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))', gap:16 }}>{data.movies.slice(0,24).map((movie) => <div key={movie.id} style={{ borderRadius:18, overflow:'hidden', background:'rgba(255,255,255,.045)', border:'1px solid rgba(255,255,255,.08)' }}>{movie.poster_path ? <img src={`${TMDB_IMAGE_URL}${movie.poster_path}`} alt={movie.title} style={{ width:'100%', aspectRatio:'2/3', objectFit:'cover', display:'block' }} /> : <div style={{ aspectRatio:'2/3', display:'grid', placeItems:'center', fontSize:38 }}>🎬</div>}<div style={{ padding:10 }}><strong style={{ display:'block', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{movie.title}</strong><span style={{ opacity:.5, fontSize:11 }}>{movie.release_date?.slice(0,4) || '—'}</span></div></div>)}</div> : <p style={{ opacity:.5 }}>Todavía no tiene películas vistas.</p>}
+                      {data.movies.length > 24 && <p style={{ textAlign:'center', opacity:.45, fontSize:12, marginTop:16 }}>Mostrando 24 de {data.movies.length} películas.</p>}
+                    </section>
+
+                    <section className="section" style={{ marginTop:28 }}>
+                      <div className="section-title"><h2>📺 Sus series</h2><span className="movie-count">{data.series.length}</span></div>
+                      {data.series.length ? <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(170px,1fr))', gap:16 }}>{data.series.slice(0,24).map((serie) => { const vistos = data.episodes[String(serie.id)]?.length || 0; return <div key={serie.id} style={{ borderRadius:18, overflow:'hidden', background:'rgba(255,255,255,.045)', border:'1px solid rgba(255,255,255,.08)' }}>{serie.poster_path ? <img src={`${TMDB_IMAGE_URL}${serie.poster_path}`} alt={serie.name} style={{ width:'100%', aspectRatio:'2/3', objectFit:'cover', display:'block' }} /> : <div style={{ aspectRatio:'2/3', display:'grid', placeItems:'center', fontSize:38 }}>📺</div>}<div style={{ padding:10 }}><strong style={{ display:'block', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{serie.name}</strong><span style={{ opacity:.5, fontSize:11 }}>{serie.first_air_date?.slice(0,4) || '—'} · {vistos} episodios</span></div></div> })}</div> : <p style={{ opacity:.5 }}>Todavía no tiene series vistas.</p>}
+                    </section>
+
+                    <section style={{ marginTop:28, padding:22, borderRadius:26, background:'linear-gradient(135deg,rgba(255,79,154,.08),rgba(91,107,255,.07))', border:'1px solid rgba(255,255,255,.08)' }}><strong>⏱️ Tiempo registrado</strong><p style={{ margin:'8px 0 0', opacity:.55 }}>{horas > 0 ? `${horas} horas` : 'Aún no hay suficiente información de duración para calcularlo.'}</p></section>
+                  </>
+                )
+              })()}
+            </div>
           </section>
         )}
       </main>
