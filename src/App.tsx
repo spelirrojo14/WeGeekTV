@@ -131,6 +131,45 @@ type TmdbEpisode = {
 
 type EpisodiosVistosPorSerie = Record<string, TmdbEpisode[]>
 
+// Normaliza episodios vistos para que la aplicación trabaje únicamente con
+// episodios reales de las temporadas principales (1+), evitando duplicados
+// aunque Supabase/localStorage devuelvan la misma fila más de una vez.
+const normalizarEpisodiosVistos = (origen: EpisodiosVistosPorSerie): EpisodiosVistosPorSerie => {
+  const resultado: EpisodiosVistosPorSerie = {}
+
+  for (const [serieId, episodios] of Object.entries(origen || {})) {
+    if (!Array.isArray(episodios)) continue
+
+    const vistos = new Set<string>()
+    const unicos: TmdbEpisode[] = []
+
+    for (const episodio of episodios) {
+      const temporada = Number(episodio?.season_number)
+      const numero = Number(episodio?.episode_number)
+      if (!Number.isFinite(temporada) || temporada < 1 || !Number.isFinite(numero) || numero < 1) continue
+
+      const clave = `${temporada}:${numero}`
+      if (vistos.has(clave)) continue
+      vistos.add(clave)
+      unicos.push({ ...episodio, season_number: temporada, episode_number: numero })
+    }
+
+    if (unicos.length) resultado[String(serieId)] = unicos
+  }
+
+  return resultado
+}
+
+// TMDB incluye en `number_of_episodes` también los 39 especiales de Friends.
+// La pantalla de la aplicación, sin embargo, solo permite temporadas 1-10.
+// Para mantener la cifra coherente con lo que realmente se puede marcar,
+// calculamos el total de temporadas principales y nunca usamos season 0.
+const contarEpisodiosTemporadasPrincipales = (temporadas?: { season_number: number; episode_count?: number }[]) =>
+  (temporadas || []).reduce((total, temporada) =>
+    temporada.season_number >= 1 ? total + Number(temporada.episode_count || 0) : total,
+    0,
+  )
+
 type TmdbSeriesDetails = TmdbSeries & {
   number_of_seasons?: number
   number_of_episodes?: number
@@ -512,6 +551,33 @@ function AchievementBadge({ achievement, tierIndex, locked = false, size = 150, 
   )
 }
 
+// =========================================================
+// v8 · PROTECCIÓN TMDB
+// Una petición lenta, caída o inválida no puede bloquear la aplicación.
+// =========================================================
+const TMDB_REQUEST_TIMEOUT_MS = 8000;
+
+async function fetchTMDBSafe(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), TMDB_REQUEST_TIMEOUT_MS);
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch {
+    // Devolvemos una respuesta HTTP fallida en lugar de null para que todos
+    // los consumidores puedan comprobar response.ok sin errores de TypeScript.
+    // Así un timeout de TMDB no rompe la interfaz ni propaga null.
+    // Los consumidores simplemente reciben response.ok === false.
+    // No se pierde ningún dato local por este fallo de red.
+    return new Response(null, { status: 599, statusText: 'TMDB request failed' });
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 function App() {
   const [session, setSession] = useState<any>(null)
   useEffect(() => {
@@ -535,6 +601,10 @@ function App() {
     cargarSeriesDesdeSupabase()
   }, [session])
   const [pagina, setPagina] = useState('inicio')
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+  }, [pagina])
   const [amigoSeleccionado, setAmigoSeleccionado] = useState<Friend | null>(null)
   const [amigoPerfilData, setAmigoPerfilData] = useState<FriendProfileData | null>(null)
   const [cargandoPerfilAmigo, setCargandoPerfilAmigo] = useState(false)
@@ -569,7 +639,41 @@ function App() {
   const [serieSeleccionada, setSerieSeleccionada] = useState<TmdbSeriesDetails | null>(null)
   const [cargandoSerieDetalles, setCargandoSerieDetalles] = useState(false)
   const [errorSerieDetalles, setErrorSerieDetalles] = useState('')
+  const [episodiosPrincipalesSerieSeleccionada, setEpisodiosPrincipalesSerieSeleccionada] = useState<number | null>(null)
 
+  useEffect(() => {
+    let cancelado = false
+    const cargarTotalEpisodiosPrincipales = async () => {
+      if (!serieSeleccionada) {
+        setEpisodiosPrincipalesSerieSeleccionada(null)
+        return
+      }
+      const temporadas = Number(serieSeleccionada.number_of_seasons || 0)
+      if (!temporadas) {
+        setEpisodiosPrincipalesSerieSeleccionada(serieSeleccionada.number_of_episodes ?? null)
+        return
+      }
+      try {
+        const apiKey = import.meta.env.VITE_TMDB_API_KEY
+        const respuestas = await Promise.all(
+          Array.from({ length: temporadas }, (_, indice) => indice + 1).map(async (temporada) => {
+            const respuesta = await fetchTMDBSafe(`https://api.themoviedb.org/3/tv/${serieSeleccionada.id}/season/${temporada}?api_key=${apiKey}&language=es-ES`)
+            if (!respuesta.ok) return 0
+            const datos = await respuesta.json()
+            return Array.isArray(datos.episodes) ? datos.episodes.length : 0
+          }),
+        )
+        if (!cancelado) {
+          const totalTemporadas = respuestas.reduce((total, cantidad) => total + cantidad, 0)
+          setEpisodiosPrincipalesSerieSeleccionada(totalTemporadas > 0 ? totalTemporadas : (contarEpisodiosTemporadasPrincipales(serieSeleccionada.seasons) || serieSeleccionada.number_of_episodes || null))
+        }
+      } catch {
+        if (!cancelado) setEpisodiosPrincipalesSerieSeleccionada(serieSeleccionada.number_of_episodes ?? null)
+      }
+    }
+    cargarTotalEpisodiosPrincipales()
+    return () => { cancelado = true }
+  }, [serieSeleccionada?.id, serieSeleccionada?.number_of_seasons, serieSeleccionada?.number_of_episodes])
 
 
   const [favoritasTMDB, setFavoritasTMDB] = useState<TmdbMovie[]>([])
@@ -595,40 +699,52 @@ useEffect(() => {
       return
     }
 
-    const peliculasVistas: TmdbMovie[] = await Promise.all(
-  (data ?? []).map(async (pelicula) => {
-    try {
-      const respuesta = await fetch(
-        `https://api.themoviedb.org/3/movie/${pelicula.tmdb_id}?api_key=${import.meta.env.VITE_TMDB_API_KEY}&language=es-ES`
-      )
+    const peliculasVistas: TmdbMovie[] = (await Promise.all(
+      (data ?? []).map(async (pelicula) => {
+        const id = Number(pelicula.tmdb_id)
+        // Un registro corrupto no puede tumbar la aplicación. Lo ignoramos
+        // visualmente hasta que pueda repararse desde la colección.
+        if (!Number.isFinite(id) || id <= 0) return null
 
-      const peliculaTMDB = await respuesta.json()
+        const base: TmdbMovie = {
+          id,
+          title: pelicula.title || 'Película sin título',
+          poster_path: pelicula.poster_path ?? null,
+          vote_average: Number(pelicula.vote_average ?? 0) || 0,
+          release_date: pelicula.release_date ?? '',
+          runtime: Number(pelicula.runtime ?? 0) || undefined,
+          genres: [],
+        }
 
-      return {
-        id: pelicula.tmdb_id,
-        title: peliculaTMDB.title ?? pelicula.title,
-        poster_path: peliculaTMDB.poster_path ?? pelicula.poster_path,
-        vote_average: peliculaTMDB.vote_average ?? 0,
-        release_date: peliculaTMDB.release_date ?? '',
-        genres: peliculaTMDB.genres ?? [],
-      }
-    } catch (error) {
-      console.error('Error al cargar película desde TMDB:', error)
+        try {
+          const respuesta = await fetch(
+            `https://api.themoviedb.org/3/movie/${id}?api_key=${import.meta.env.VITE_TMDB_API_KEY}&language=es-ES`
+          )
+          if (!respuesta.ok) return base
+          const peliculaTMDB = await respuesta.json()
+          if (!peliculaTMDB || typeof peliculaTMDB !== 'object' || peliculaTMDB.success === false) return base
 
-      return {
-        id: pelicula.tmdb_id,
-        title: pelicula.title,
-        poster_path: pelicula.poster_path,
-        vote_average: 0,
-        release_date: '',
-      }
-    }
-  })
-)
+          return {
+            ...base,
+            title: peliculaTMDB.title || base.title,
+            poster_path: peliculaTMDB.poster_path ?? base.poster_path,
+            vote_average: Number(peliculaTMDB.vote_average ?? base.vote_average) || 0,
+            release_date: peliculaTMDB.release_date || base.release_date,
+            runtime: Number(peliculaTMDB.runtime ?? base.runtime ?? 0) || undefined,
+            genres: Array.isArray(peliculaTMDB.genres) ? peliculaTMDB.genres : [],
+            backdrop_path: peliculaTMDB.backdrop_path ?? undefined,
+          } as TmdbMovie
+        } catch (error) {
+          console.warn('No se pudo enriquecer una película; se conserva la copia guardada:', id, error)
+          return base
+        }
+      }),
+    )).filter((pelicula): pelicula is TmdbMovie => Boolean(pelicula))
 
-setVistasTMDB(peliculasVistas)
+    // Evita que una fila repetida/corrupta termine provocando renders duplicados.
+    const peliculasVistasUnicas = Array.from(new Map(peliculasVistas.map((pelicula) => [pelicula.id, pelicula])).values())
 
-    setVistasTMDB(peliculasVistas)
+setVistasTMDB(peliculasVistasUnicas)
   }
 
   cargarVistasSupabase()
@@ -912,13 +1028,22 @@ const cargarEpisodiosVistosDesdeSupabase = async () => {
 
 
   const porSerie: Record<string, { season_number: number; episode_number: number }[]> = {}
+  const clavesEpisodiosPorSerie: Record<string, Set<string>> = {}
   for (const fila of filas) {
     const clave = String(fila.serie_id)
-    if (!porSerie[clave]) porSerie[clave] = []
-    porSerie[clave].push({
-      season_number: Number(fila.season_number),
-      episode_number: Number(fila.episode_number),
-    })
+    const season = Number(fila.season_number)
+    const episode = Number(fila.episode_number)
+    // Los especiales (temporada 0) no forman parte de la colección principal
+    // de la web y no deben inflar los capítulos vistos.
+    if (!Number.isFinite(season) || season < 1 || !Number.isFinite(episode) || episode < 1) continue
+    if (!porSerie[clave]) {
+      porSerie[clave] = []
+      clavesEpisodiosPorSerie[clave] = new Set<string>()
+    }
+    const claveEpisodio = `${season}:${episode}`
+    if (clavesEpisodiosPorSerie[clave].has(claveEpisodio)) continue
+    clavesEpisodiosPorSerie[clave].add(claveEpisodio)
+    porSerie[clave].push({ season_number: season, episode_number: episode })
   }
 
   const reconstruidos: EpisodiosVistosPorSerie = {}
@@ -951,7 +1076,14 @@ const cargarEpisodiosVistosDesdeSupabase = async () => {
       // alguno de los episodios guardados (por cambios de catálogo, idioma,
       // errores temporales, especiales, etc.), NO lo descartamos. Creamos un
       // registro mínimo con temporada/episodio para conservar el visto.
-      const vistos: TmdbEpisode[] = episodiosGuardados.map((guardado) => {
+      const guardadosUnicos = episodiosGuardados.filter((episodio, indice, lista) =>
+        lista.findIndex((otro) =>
+          otro.season_number === episodio.season_number &&
+          otro.episode_number === episodio.episode_number
+        ) === indice
+      )
+
+      const vistos: TmdbEpisode[] = guardadosUnicos.map((guardado) => {
         const encontrado = episodiosTMDB.find(
           (episodio) =>
             episodio.season_number === guardado.season_number &&
@@ -998,9 +1130,12 @@ const cargarEpisodiosVistosDesdeSupabase = async () => {
           )
 
           for (const episodio of episodiosLocales) {
-            const clave = `${episodio.season_number}:${episodio.episode_number}`
+            const temporada = Number(episodio?.season_number)
+            const numero = Number(episodio?.episode_number)
+            if (!Number.isFinite(temporada) || temporada < 1 || !Number.isFinite(numero) || numero < 1) continue
+            const clave = `${temporada}:${numero}`
             if (!claves.has(clave)) {
-              existentes.push(episodio)
+              existentes.push({ ...episodio, season_number: temporada, episode_number: numero })
               claves.add(clave)
             }
           }
@@ -1015,8 +1150,9 @@ const cargarEpisodiosVistosDesdeSupabase = async () => {
     console.error('No se pudieron conservar los episodios locales durante la sincronización:', error)
   }
 
-  setEpisodiosVistos(estadoFinal)
-  localStorage.setItem('wegeektv_episodios_vistos', JSON.stringify(estadoFinal))
+  const estadoNormalizado = normalizarEpisodiosVistos(estadoFinal)
+  setEpisodiosVistos(estadoNormalizado)
+  localStorage.setItem('wegeektv_episodios_vistos', JSON.stringify(estadoNormalizado))
 }
 
 useEffect(() => {
@@ -1316,10 +1452,11 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
     let changed = false
     const worker = async (index: number) => {
       const item: any = salida[index]
+      if (!item || !Number.isFinite(Number(item.id)) || Number(item.id) <= 0) return
       const key = String(item.id)
       if (cache[key]) { salida[index] = { ...item, ...cache[key] }; return }
       try {
-        const response = await fetch(`https://api.themoviedb.org/3/${tipo}/${item.id}?api_key=${apiKey}&language=es-ES`)
+        const response = await fetchTMDBSafe(`https://api.themoviedb.org/3/${tipo}/${item.id}?api_key=${apiKey}&language=es-ES`)
         if (!response.ok) return
         const details = await response.json()
         const extra = tipo === 'movie'
@@ -1333,6 +1470,62 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
     for (let i = 0; i < salida.length; i += 6) await Promise.all(salida.slice(i, i + 6).map((_, offset) => worker(i + offset)))
     if (changed) localStorage.setItem(cacheKey, JSON.stringify(cache))
     return salida
+  }
+
+  const enriquecerEpisodiosDeAmigo = async (episodes: EpisodiosVistosPorSerie, series: TmdbSeries[]): Promise<EpisodiosVistosPorSerie> => {
+    const apiKey = import.meta.env.VITE_TMDB_API_KEY
+    const base = normalizarEpisodiosVistos(episodes)
+    if (!apiKey) return base
+
+    // Un episodio solo puede contar si pertenece a una serie que realmente
+    // forma parte de la colección del amigo. Esto elimina registros huérfanos
+    // que quedaron en user_series_episodes después de versiones antiguas de la app.
+    const idsDeSeries = new Set(series.map((serie) => String(serie.id)))
+    const resultado: EpisodiosVistosPorSerie = {}
+
+    await Promise.all(Object.entries(base).map(async ([serieId, episodios]) => {
+      if (!idsDeSeries.has(String(serieId))) return
+
+      const temporadas = [...new Set(episodios.map((e) => Number(e.season_number)).filter((n) => n >= 1))]
+      const tmdbPorClave = new Map<string, TmdbEpisode>()
+      const temporadasCargadas = new Set<number>()
+
+      await Promise.all(temporadas.map(async (temporada) => {
+        try {
+          const response = await fetchTMDBSafe(`https://api.themoviedb.org/3/tv/${serieId}/season/${temporada}?api_key=${apiKey}&language=es-ES`)
+          if (!response.ok) return
+          const data = await response.json()
+          if (!Array.isArray(data.episodes)) return
+          temporadasCargadas.add(temporada)
+          for (const episodio of data.episodes as TmdbEpisode[]) {
+            tmdbPorClave.set(`${episodio.season_number}:${episodio.episode_number}`, episodio)
+          }
+        } catch {
+          // Si una temporada falla, no eliminamos datos de esa temporada.
+        }
+      }))
+
+      const filtrados: TmdbEpisode[] = []
+      const vistos = new Set<string>()
+      for (const episodio of episodios) {
+        const temporada = Number(episodio.season_number)
+        const numero = Number(episodio.episode_number)
+        const clave = `${temporada}:${numero}`
+        if (vistos.has(clave)) continue
+
+        // Si TMDB respondió correctamente esa temporada, el episodio DEBE existir
+        // en TMDB para poder contarlo. Si la consulta falló, lo conservamos.
+        if (temporadasCargadas.has(temporada) && !tmdbPorClave.has(clave)) continue
+
+        vistos.add(clave)
+        const tmdbEpisode = tmdbPorClave.get(clave)
+        filtrados.push(tmdbEpisode ? { ...episodio, ...tmdbEpisode } : episodio)
+      }
+
+      if (filtrados.length) resultado[serieId] = filtrados
+    }))
+
+    return normalizarEpisodiosVistos(resultado)
   }
 
   const abrirPerfil = async (amigo: Friend) => {
@@ -1352,31 +1545,68 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
       const rawSeries = Array.isArray(resultado.series) ? resultado.series : []
       const rawEpisodes = Array.isArray(resultado.episodes) ? resultado.episodes : []
 
-      const movies: TmdbMovie[] = rawMovies.map((movie: any) => ({
-        id: Number(movie.tmdb_id), title: movie.title || 'Película', poster_path: movie.poster_path || null,
-        release_date: movie.release_date || '', vote_average: Number(movie.vote_average || 0), runtime: Number(movie.runtime || 0) || undefined, genres: movie.genres || [],
-      }))
-      const series: TmdbSeries[] = rawSeries.map((serie: any) => ({
-        id: Number(serie.serie_id), name: serie.name || 'Serie', poster_path: serie.poster_path || null,
-        first_air_date: serie.first_air_date || '', vote_average: Number(serie.vote_average || 0), tiempoTotal: Number(serie.duracion || 0) || undefined, genres: serie.genres || [],
-      }))
+      const movies: TmdbMovie[] = Array.from(
+        new Map<number, TmdbMovie>(
+          rawMovies
+            .map((movie: any): [number, TmdbMovie] => {
+              const item: TmdbMovie = {
+                id: Number(movie.tmdb_id),
+                title: movie.title || 'Película',
+                poster_path: movie.poster_path || null,
+                release_date: movie.release_date || '',
+                vote_average: Number(movie.vote_average || 0),
+                runtime: Number(movie.runtime || 0) || undefined,
+                genres: Array.isArray(movie.genres) ? movie.genres : [],
+              }
+              return [item.id, item]
+            })
+            .filter(([id]: [number, TmdbMovie]) => Number.isFinite(id) && id > 0),
+        ).values(),
+      )
+      const series: TmdbSeries[] = Array.from(
+        new Map<number, TmdbSeries>(
+          rawSeries
+            .map((serie: any): [number, TmdbSeries] => {
+              const item: TmdbSeries = {
+                id: Number(serie.serie_id),
+                name: serie.name || 'Serie',
+                poster_path: serie.poster_path || null,
+                first_air_date: serie.first_air_date || '',
+                vote_average: Number(serie.vote_average || 0),
+                tiempoTotal: Number(serie.duracion || 0) || undefined,
+                genres: Array.isArray(serie.genres) ? serie.genres : [],
+              }
+              return [item.id, item]
+            })
+            .filter(([id]: [number, TmdbSeries]) => Number.isFinite(id) && id > 0),
+        ).values(),
+      )
       const episodes: EpisodiosVistosPorSerie = {}
+      const clavesEpisodiosPerfil = new Set<string>()
       for (const fila of rawEpisodes) {
-        const serieId = String(fila.serie_id)
+        const serieIdNumero = Number(fila.serie_id)
+        const season = Number(fila.season_number)
+        const episode = Number(fila.episode_number)
+        if (!Number.isFinite(serieIdNumero) || serieIdNumero <= 0 || !Number.isFinite(season) || season < 1 || !Number.isFinite(episode) || episode < 1) continue
+        const serieId = String(serieIdNumero)
+        const clave = `${serieId}:${season}:${episode}`
+        if (clavesEpisodiosPerfil.has(clave)) continue
+        clavesEpisodiosPerfil.add(clave)
         ;(episodes[serieId] ||= []).push({
-          id: Number(fila.episode_id || `${fila.serie_id}${fila.season_number}${fila.episode_number}`),
-          name: fila.name || `Episodio ${fila.episode_number}`, episode_number: Number(fila.episode_number), season_number: Number(fila.season_number),
+          id: Number(fila.episode_id) > 0 ? Number(fila.episode_id) : -(serieIdNumero * 100000 + season * 1000 + episode),
+          name: fila.name || `Episodio ${episode}`, episode_number: episode, season_number: season,
           runtime: Number(fila.runtime || 0) || undefined, air_date: fila.air_date || undefined, still_path: fila.still_path || null, overview: fila.overview || undefined,
         })
       }
 
       const enrichedMovies = await enriquecerColeccionAmigo(movies, 'movie')
       const enrichedSeries = await enriquecerColeccionAmigo(series, 'tv')
-      const achievements = calcularLogrosDeColeccion(enrichedMovies, enrichedSeries, episodes)
+      const enrichedEpisodes = await enriquecerEpisodiosDeAmigo(episodes, enrichedSeries)
+      const achievements = calcularLogrosDeColeccion(enrichedMovies, enrichedSeries, enrichedEpisodes)
       const favoritos = Number(resultado.stats?.favorites ?? 0)
       const friend: Friend = { ...amigo, name: perfil.display_name || perfil.username || amigo.name, avatar: perfil.avatar_url || amigo.avatar, movies: enrichedMovies.length, series: enrichedSeries.length, favorites: favoritos }
       setAmigoSeleccionado(friend)
-      setAmigoPerfilData({ profile: { ...perfil, id: amigo.id }, movies: enrichedMovies, series: enrichedSeries, episodes, achievements })
+      setAmigoPerfilData({ profile: { ...perfil, id: amigo.id }, movies: enrichedMovies, series: enrichedSeries, episodes: enrichedEpisodes, achievements })
     } catch (error: any) {
       console.error('Error cargando el perfil del amigo:', error)
       setErrorPerfilAmigo(error?.message || 'No se ha podido cargar el perfil del amigo.')
@@ -2142,7 +2372,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
           if (pelicula.genres?.length) return pelicula
           if (movieCache[String(pelicula.id)]) return { ...pelicula, genres: movieCache[String(pelicula.id)] }
           try {
-            const respuesta = await fetch(`https://api.themoviedb.org/3/movie/${pelicula.id}?api_key=${apiKey}&language=es-ES`)
+            const respuesta = await fetchTMDBSafe(`https://api.themoviedb.org/3/movie/${pelicula.id}?api_key=${apiKey}&language=es-ES`)
             if (!respuesta.ok) return pelicula
             const datos = await respuesta.json()
             const genres = Array.isArray(datos.genres) ? datos.genres : []
@@ -2155,7 +2385,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
           if (serie.genres?.length) return serie
           if (seriesCache[String(serie.id)]) return { ...serie, genres: seriesCache[String(serie.id)] }
           try {
-            const respuesta = await fetch(`https://api.themoviedb.org/3/tv/${serie.id}?api_key=${apiKey}&language=es-ES`)
+            const respuesta = await fetchTMDBSafe(`https://api.themoviedb.org/3/tv/${serie.id}?api_key=${apiKey}&language=es-ES`)
             if (!respuesta.ok) return serie
             const datos = await respuesta.json()
             const genres = Array.isArray(datos.genres) ? datos.genres : []
@@ -4095,8 +4325,8 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                       {typeof serieSeleccionada.number_of_seasons === 'number' && (
                         <span>📺 {serieSeleccionada.number_of_seasons} temporadas</span>
                       )}
-                      {typeof serieSeleccionada.number_of_episodes === 'number' && (
-                        <span>🎬 {serieSeleccionada.number_of_episodes} episodios</span>
+                      {typeof (episodiosPrincipalesSerieSeleccionada ?? serieSeleccionada.number_of_episodes) === 'number' && (
+                        <span>🎬 {episodiosPrincipalesSerieSeleccionada ?? serieSeleccionada.number_of_episodes} episodios</span>
                       )}
                     </div>
 
@@ -4873,7 +5103,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
               const iniciados = logrosCalculados.filter((a) => a.tierIndex >= 0).length
               const diamantes = logrosCalculados.filter((a) => a.tierIndex === 4).length
               const progresoTotal = Math.round(logrosCalculados.reduce((total, a) => total + Math.max(0, a.tierIndex + 1), 0) / (logrosCalculados.length * 5) * 100)
-              const maxTier = logrosCalculados.reduce((best, a) => Math.max(best, a.tierIndex), -1)
+              const maxAchievementTier = logrosCalculados.reduce((best, a) => Math.max(best, a.tierIndex), -1)
               const heroAchievement = logrosCalculados.find((a) => a.tierIndex >= 0) || logrosCalculados[0]
               return (
                 <>
@@ -4883,13 +5113,13 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                       <div style={{ position:'absolute', width:300, height:300, borderRadius:'50%', left:-160, bottom:-180, background:'radial-gradient(circle,rgba(97,217,255,.22),transparent 68%)' }} />
                       <div style={{ position:'relative', display:'flex', alignItems:'center', gap:30, flexWrap:'wrap' }}>
                         <div className="wg-achievement-medal" style={{ width:220, height:220, flex:'0 0 220px', position:'relative', animation:'wgAchievementFloat 4s ease-in-out infinite', transition:'transform .25s ease', filter:'drop-shadow(0 20px 35px rgba(0,0,0,.35))' }}>
-                          <div style={{ position:'absolute', inset:-35, borderRadius:'50%', background:`radial-gradient(circle,${maxTier >= 0 ? ACHIEVEMENT_TIER_GLOWS[Math.max(0,maxTier)] : 'rgba(255,79,154,.18)'} 0%,transparent 67%)`, filter:'blur(10px)' }} />
-                          <AchievementBadge achievement={heroAchievement} tierIndex={Math.max(0,maxTier)} size={220} effects />
+                          <div style={{ position:'absolute', inset:-35, borderRadius:'50%', background:`radial-gradient(circle,${maxAchievementTier >= 0 ? ACHIEVEMENT_TIER_GLOWS[Math.max(0,maxAchievementTier)] : 'rgba(255,79,154,.18)'} 0%,transparent 67%)`, filter:'blur(10px)' }} />
+                          <AchievementBadge achievement={heroAchievement} tierIndex={Math.max(0,maxAchievementTier)} size={220} effects />
                         </div>
                         <div style={{ flex:1, minWidth:240 }}>
                           <span style={{ display:'inline-flex', padding:'7px 12px', borderRadius:999, background:'rgba(255,255,255,.08)', border:'1px solid rgba(255,255,255,.13)', fontSize:11, fontWeight:900, letterSpacing:'.15em' }}>TU PROGRESO</span>
                           <h2 style={{ fontSize:'clamp(30px,4vw,48px)', margin:'16px 0 8px' }}>{iniciados === 0 ? 'Empieza tu leyenda' : `${iniciados} logros desbloqueados`}</h2>
-                          <p style={{ margin:0, opacity:.68, lineHeight:1.6 }}>Tu nivel actual: <strong style={{ color:maxTier >= 0 ? ACHIEVEMENT_TIER_COLORS[maxTier] : '#fff' }}>{maxTier >= 0 ? ACHIEVEMENT_TIER_NAMES[maxTier] : 'Sin rango'}</strong></p>
+                          <p style={{ margin:0, opacity:.68, lineHeight:1.6 }}>Tu nivel actual: <strong style={{ color:maxAchievementTier >= 0 ? ACHIEVEMENT_TIER_COLORS[maxAchievementTier] : '#fff' }}>{maxAchievementTier >= 0 ? ACHIEVEMENT_TIER_NAMES[maxAchievementTier] : 'Sin rango'}</strong></p>
                           <div style={{ marginTop:24, height:12, borderRadius:999, padding:2, background:'rgba(0,0,0,.25)', border:'1px solid rgba(255,255,255,.10)' }}><div style={{ height:'100%', width:`${progresoTotal}%`, borderRadius:999, background:'linear-gradient(90deg,#ff4f9a,#a66cff,#61d9ff)', boxShadow:'0 0 18px rgba(166,108,255,.45)', transition:'width .5s ease' }} /></div>
                           <div style={{ display:'flex', justifyContent:'space-between', marginTop:8, fontSize:12, opacity:.62 }}><span>0%</span><span>{progresoTotal}% completado</span><span>100%</span></div>
                         </div>
@@ -4908,7 +5138,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                   <section style={{ marginTop:22, padding:'26px 24px 22px', borderRadius:30, background:'linear-gradient(135deg,rgba(255,255,255,.055),rgba(255,255,255,.025))', border:'1px solid rgba(255,255,255,.10)', boxShadow:'0 20px 60px rgba(0,0,0,.18)' }}>
                     <div style={{ textAlign:'center' }}><p className="small-title" style={{ marginBottom:5 }}>LA ESCALERA</p><h2 style={{ margin:0, fontSize:28 }}>De novato a leyenda</h2><p style={{ margin:'7px auto 0', opacity:.58, maxWidth:650 }}>Cada rango desbloquea una versión más espectacular de tus medallas.</p></div>
                     <div className="wg-achievement-levels" style={{ display:'grid', gridTemplateColumns:'repeat(5,minmax(0,1fr))', gap:10, marginTop:24 }}>
-                      {ACHIEVEMENT_TIER_NAMES.map((tier,index) => <div key={tier} style={{ position:'relative', textAlign:'center', padding:'12px 5px 8px', borderRadius:22, background:`linear-gradient(180deg,${ACHIEVEMENT_TIER_GLOWS[index]},rgba(255,255,255,.025))`, border:`1px solid ${ACHIEVEMENT_TIER_COLORS[index]}55`, boxShadow:index <= maxTier ? `0 0 28px ${ACHIEVEMENT_TIER_GLOWS[index]}` : 'none' }}><div style={{ height:120, display:'grid', placeItems:'center' }}><AchievementBadge achievement={heroAchievement} tierIndex={index} size={105} effects /></div><strong style={{ display:'block', fontSize:11, color:ACHIEVEMENT_TIER_COLORS[index], letterSpacing:'.12em', textTransform:'uppercase' }}>{tier}</strong><span style={{ display:'block', fontSize:10, opacity:.45, marginTop:4 }}>{index <= maxTier ? 'DESBLOQUEADO' : 'POR CONSEGUIR'}</span></div>)}
+                      {ACHIEVEMENT_TIER_NAMES.map((tier,index) => <div key={tier} style={{ position:'relative', textAlign:'center', padding:'12px 5px 8px', borderRadius:22, background:`linear-gradient(180deg,${ACHIEVEMENT_TIER_GLOWS[index]},rgba(255,255,255,.025))`, border:`1px solid ${ACHIEVEMENT_TIER_COLORS[index]}55`, boxShadow:index <= maxAchievementTier ? `0 0 28px ${ACHIEVEMENT_TIER_GLOWS[index]}` : 'none' }}><div style={{ height:120, display:'grid', placeItems:'center' }}><AchievementBadge achievement={heroAchievement} tierIndex={index} size={105} effects /></div><strong style={{ display:'block', fontSize:11, color:ACHIEVEMENT_TIER_COLORS[index], letterSpacing:'.12em', textTransform:'uppercase' }}>{tier}</strong><span style={{ display:'block', fontSize:10, opacity:.45, marginTop:4 }}>{index <= maxAchievementTier ? 'DESBLOQUEADO' : 'POR CONSEGUIR'}</span></div>)}
                     </div>
                   </section>
 
@@ -4971,10 +5201,10 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
               const conseguidos = logrosCalculados.filter((logro) => logro.tierIndex >= 0)
               const ordenados = [...conseguidos].sort((a,b) => b.tierIndex-a.tierIndex || b.percent-a.percent)
               const protagonista = ordenados[0] || null
-              const maxTier = protagonista ? protagonista.tierIndex : -1
-              const categoriaActual = maxTier >= 0 ? ACHIEVEMENT_TIER_NAMES[maxTier] : 'Bronce'
-              const colorActual = maxTier >= 0 ? ACHIEVEMENT_TIER_COLORS[maxTier] : ACHIEVEMENT_TIER_COLORS[0]
-              const glowActual = maxTier >= 0 ? ACHIEVEMENT_TIER_GLOWS[maxTier] : ACHIEVEMENT_TIER_GLOWS[0]
+              const maxAchievementTier = protagonista ? protagonista.tierIndex : -1
+              const categoriaActual = maxAchievementTier >= 0 ? ACHIEVEMENT_TIER_NAMES[maxAchievementTier] : 'Bronce'
+              const colorActual = maxAchievementTier >= 0 ? ACHIEVEMENT_TIER_COLORS[maxAchievementTier] : ACHIEVEMENT_TIER_COLORS[0]
+              const glowActual = maxAchievementTier >= 0 ? ACHIEVEMENT_TIER_GLOWS[maxAchievementTier] : ACHIEVEMENT_TIER_GLOWS[0]
               const bronces = conseguidos.filter((logro) => logro.tierIndex === 0).length
               const platas = conseguidos.filter((logro) => logro.tierIndex === 1).length
               const oros = conseguidos.filter((logro) => logro.tierIndex === 2).length
@@ -5119,140 +5349,269 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
 
 
         {pagina === 'amigos' && (
-          <section className="welcome" style={{ position: 'relative', overflow: 'hidden' }}>
-            <div style={{ position:'absolute', inset:'-120px -80px auto -80px', height:'420px', background:'radial-gradient(circle at 18% 30%, rgba(255,64,196,.28), transparent 32%), radial-gradient(circle at 78% 18%, rgba(94,92,255,.24), transparent 30%), radial-gradient(circle at 52% 70%, rgba(0,229,255,.12), transparent 28%)', filter:'blur(12px)', pointerEvents:'none' }} />
-
-            <div style={{ position:'relative', zIndex:1, padding:'34px 0 22px' }}>
-              <div style={{ display:'flex', alignItems:'center', gap:'14px', marginBottom:'10px' }}>
-                <div style={{ width:58, height:58, borderRadius:20, display:'grid', placeItems:'center', fontSize:30, background:'linear-gradient(135deg, rgba(255,72,202,.22), rgba(93,91,255,.22))', border:'1px solid rgba(255,255,255,.14)', boxShadow:'0 0 34px rgba(255,72,202,.18)' }}>👥</div>
-                <div>
-                  <p className="small-title" style={{ margin:'0 0 5px' }}>TU GRUPO</p>
-                  <h1 style={{ margin:0, fontSize:'clamp(38px, 5vw, 62px)', lineHeight:.95, background:'linear-gradient(90deg,#fff 0%,#ff72d2 42%,#8d8bff 78%,#62e9ff 100%)', WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent', textShadow:'0 0 32px rgba(255,91,214,.14)' }}>Mis amigos</h1>
+          <section className="wgx-friends-page">
+            <div className="wgx-friends-aurora aurora-one" />
+            <div className="wgx-friends-aurora aurora-two" />
+            <div className="wgx-friends-grid" />
+            <div className="wgx-friends-shell">
+              <header className="wgx-friends-command">
+                <div className="wgx-command-orbit orbit-a" />
+                <div className="wgx-command-orbit orbit-b" />
+                <div className="wgx-command-orbit orbit-c" />
+                <div className="wgx-command-star star-a">✦</div>
+                <div className="wgx-command-star star-b">✧</div>
+                <div className="wgx-command-star star-c">✦</div>
+                <div className="wgx-command-copy">
+                  <div className="wgx-eyebrow">
+<span>✦</span> WE GEEK TV · SOCIAL UNIVERSE <span>✦</span>
+</div>
+                  <h1>AMIGOS<span>.</span>
+</h1>
+                  <p>Tu gente. Sus historias. Vuestras colecciones.<br />
+<strong>Una comunidad que se vive, no solo se mira.</strong>
+</p>
+                  <div className="wgx-command-chips">
+                    <span>🎬 CINE</span>
+<span>📺 SERIES</span>
+<span>🏆 LOGROS</span>
+<span>💎 VITRINAS</span>
+                  </div>
+                  <div className="wgx-command-livebar">
+                    <span className="livebar-dot" />
+                    <strong>Tu círculo está vivo</strong>
+                    <span>{amigosActuales.length} conexiones · {solicitudesRecibidas.length} solicitudes</span>
+                  </div>
                 </div>
+                <div className="wgx-command-core">
+                  <div className="wgx-core-ring ring-1" />
+                  <div className="wgx-core-ring ring-2" />
+                  <div className="wgx-core-ring ring-3" />
+                  <div className="wgx-core-glow" />
+                  <div className="wgx-core-avatar">👥</div>
+                  <div className="wgx-core-label">
+<strong>{amigosActuales.length}</strong>
+<span>EN TU CÍRCULO</span>
+</div>
+                </div>
+                <div className="wgx-command-footer">
+<span>SCROLL PARA EXPLORAR</span>
+<i>↓</i>
+</div>
+              </header>
+
+              <div className="wgx-social-stats">
+                <div className="wgx-social-stat">
+<span className="stat-icon">👥</span>
+<div>
+<strong>{amigosActuales.length}</strong>
+<span>Amigos</span>
+</div>
+</div>
+                <div className="wgx-social-stat">
+<span className="stat-icon">📨</span>
+<div>
+<strong>{solicitudesRecibidas.length}</strong>
+<span>Solicitudes</span>
+</div>
+</div>
+                <div className="wgx-social-stat">
+<span className="stat-icon">⚡</span>
+<div>
+<strong>{amigosActuales.length > 0 ? 'ACTIVO' : 'NUEVO'}</strong>
+<span>Estado social</span>
+</div>
+</div>
+                <div className="wgx-social-stat stat-highlight">
+<span className="stat-icon">💫</span>
+<div>
+<strong>WGT</strong>
+<span>Tu universo</span>
+</div>
+</div>
               </div>
-              <p style={{ margin:'16px 0 0', maxWidth:720, fontSize:17, lineHeight:1.65, color:'rgba(255,255,255,.62)' }}>Tu pequeña comunidad dentro de WeGeekTV. <strong style={{ color:'rgba(255,255,255,.9)' }}>Añade amigos, descubre sus perfiles y compara vuestra colección.</strong></p>
-            </div>
 
-            <div style={{ position:'relative', zIndex:1, margin:'22px 0 30px', padding:'18px', borderRadius:28, background:'linear-gradient(135deg, rgba(255,255,255,.075), rgba(255,255,255,.025))', border:'1px solid rgba(255,255,255,.11)', boxShadow:'0 18px 55px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.07)' }}>
-              <div style={{ display:'flex', alignItems:'center', gap:14 }}>
-                <div style={{ width:44, height:44, flex:'0 0 44px', borderRadius:15, display:'grid', placeItems:'center', fontSize:20, background:'linear-gradient(135deg, #ff4fca, #716cff)', boxShadow:'0 0 25px rgba(255,79,202,.28)' }}>⌕</div>
-                <div style={{ flex:1 }}>
-                  <div style={{ fontSize:11, letterSpacing:'.18em', textTransform:'uppercase', color:'rgba(255,255,255,.4)', marginBottom:6 }}>Encontrar gente</div>
-                  <input
-                    value={busquedaAmigos}
-                    onChange={(e) => setBusquedaAmigos(e.target.value)}
-                    placeholder="Busca por nombre de usuario..."
-                    style={{ width:'100%', boxSizing:'border-box', padding:'4px 0', border:0, outline:0, background:'transparent', color:'white', fontSize:19, fontWeight:700 }}
-                  />
+              <section className="wgx-find-panel">
+                <div className="wgx-find-heading">
+                  <div>
+<span className="wgx-section-kicker">01 · DESCUBRE</span>
+<h2>Encuentra tu próxima <em>conexión</em>
+</h2>
+</div>
+                  <span className="wgx-live-dot">
+<i /> LIVE COMMUNITY</span>
                 </div>
-                <div style={{ display:'flex', flexDirection:'column', alignItems:'flex-end', minWidth:76 }}>
-                  <strong style={{ fontSize:28, lineHeight:1, background:'linear-gradient(90deg,#ff72d2,#8d8bff)', WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent' }}>{amigosActuales.length}</strong>
-                  <span style={{ fontSize:10, textTransform:'uppercase', letterSpacing:'.12em', color:'rgba(255,255,255,.38)', marginTop:5 }}>amigos</span>
+                <div className="wgx-find-input-wrap">
+                  <div className="wgx-search-symbol">⌕</div>
+                  <div className="wgx-search-field">
+                    <label>BUSCAR USUARIO</label>
+                    <input value={busquedaAmigos} onChange={(e) => setBusquedaAmigos(e.target.value)} placeholder="Escribe un nombre y entra en su universo..." />
+                  </div>
+                  <div className="wgx-search-count">
+<strong>{usuariosBusqueda.length || amigosActuales.length}</strong>
+<span>{busquedaAmigos.trim() ? 'RESULTADOS' : 'AMIGOS'}</span>
+</div>
                 </div>
-              </div>
-            </div>
+              </section>
 
-            {busquedaAmigos.trim() && (
-              <section className="section" style={{ position:'relative', zIndex:1 }}>
-                <div className="section-title"><h2 style={{ fontSize:26 }}>🔎 Resultados de búsqueda</h2><span className="movie-count">{usuariosBusqueda.length}</span></div>
-                {buscandoUsuarios ? (
-                  <div style={{ padding:'28px', textAlign:'center', borderRadius:24, background:'rgba(255,255,255,.035)', color:'rgba(255,255,255,.55)' }}>Buscando usuarios…</div>
-                ) : usuariosBusqueda.length > 0 ? (
-                  <div className="cards">
-                    {usuariosBusqueda.map((usuario) => {
-                      const esAmigo = amigosActuales.includes(usuario.id)
-                      const enviada = solicitudesEnviadas.includes(usuario.id)
-                      const recibida = solicitudesRecibidas.includes(usuario.id)
-                      return (
-                        <div className="card" key={usuario.id} style={{ position:'relative', overflow:'hidden', borderRadius:24, background:'linear-gradient(145deg, rgba(255,78,202,.11), rgba(95,91,255,.08) 55%, rgba(255,255,255,.035))', border:'1px solid rgba(255,255,255,.11)', boxShadow:'0 18px 45px rgba(0,0,0,.2)' }}>
-                          <div style={{ position:'absolute', top:-35, right:-35, width:110, height:110, borderRadius:'50%', background:'rgba(255,86,208,.16)', filter:'blur(18px)' }} />
-                          <div className="poster" style={{ position:'relative', zIndex:1, width:86, height:86, borderRadius:26, fontSize:40, display:'grid', placeItems:'center', margin:'0 auto 16px', background:'linear-gradient(135deg, rgba(255,255,255,.1), rgba(255,255,255,.035))', border:'1px solid rgba(255,255,255,.13)', boxShadow:'0 0 35px rgba(255,87,208,.14)' }}>{usuario.avatar}</div>
-                          <h3 style={{ position:'relative', zIndex:1, fontSize:21 }}>{usuario.name}</h3>
-                          <p style={{ position:'relative', zIndex:1 }}>{esAmigo ? '🤝 Ya sois amigos' : enviada ? '⏳ Solicitud enviada' : recibida ? '📨 Te ha enviado una solicitud' : 'Usuario de WeGeekTV'}</p>
-                          {esAmigo ? (
-                            <button className="secondary" onClick={() => abrirPerfil(usuario)} style={{ position:'relative', zIndex:1, width:'100%' }}>👤 Ver perfil</button>
-                          ) : recibida ? (
-                            <div style={{ display:'flex', gap:8, position:'relative', zIndex:1 }}>
-                              <button className="primary" onClick={() => aceptarSolicitud(usuario.id)} style={{ flex:1 }}>✅ Aceptar</button>
-                              <button className="secondary" onClick={() => rechazarSolicitud(usuario.id)} style={{ flex:1 }}>Rechazar</button>
+              {busquedaAmigos.trim() && (
+                <section className="wgx-discovery-section">
+                  <div className="wgx-section-heading">
+<div>
+<span className="wgx-section-kicker">02 · RESULTADOS</span>
+<h2>Personas encontradas</h2>
+</div>
+<span className="wgx-heading-count">{usuariosBusqueda.length}</span>
+</div>
+                  {buscandoUsuarios ? (
+                    <div className="wgx-empty-state compact">
+<div className="wgx-loader-orbit">
+<i>✦</i>
+</div>
+<h3>Buscando en el universo...</h3>
+<p>Estamos rastreando usuarios de WeGeekTV.</p>
+</div>
+                  ) : usuariosBusqueda.length > 0 ? (
+                    <div className="wgx-discovery-grid">
+                      {usuariosBusqueda.map((usuario, index) => {
+                        const esAmigo = amigosActuales.includes(usuario.id)
+                        const enviada = solicitudesEnviadas.includes(usuario.id)
+                        const recibida = solicitudesRecibidas.includes(usuario.id)
+                        return (
+                          <article className="wgx-person-card search-card" key={usuario.id}>
+                            <div className="wgx-person-noise" />
+                            <div className="wgx-person-top">
+<span>#{String(index + 1).padStart(2,'0')}</span>
+<i>✦</i>
+</div>
+                            <button className="wgx-person-avatar" onClick={() => abrirPerfil(usuario)}>{usuario.avatar}</button>
+                            <div className="wgx-person-name">{usuario.name}</div>
+                            <div className="wgx-person-meta">
+<i /> {esAmigo ? 'YA SOIS AMIGOS' : 'MIEMBRO WEGEEKTV'}</div>
+                            <div className="wgx-person-actions">
+                              {esAmigo ? <button className="wgx-action primary" onClick={() => abrirPerfil(usuario)}>VER UNIVERSO <span>↗</span>
+</button> : recibida ? <>
+<button className="wgx-action primary" onClick={() => aceptarSolicitud(usuario.id)}>ACEPTAR <span>✓</span>
+</button>
+<button className="wgx-action ghost" onClick={() => rechazarSolicitud(usuario.id)}>RECHAZAR</button>
+</> : enviada ? <button className="wgx-action ghost" disabled>SOLICITUD ENVIADA · ⏳</button> : <button className="wgx-action primary" onClick={() => enviarSolicitudAmistad(usuario)}>AÑADIR AL CÍRCULO <span>+</span>
+</button>}
                             </div>
-                          ) : enviada ? (
-                            <button className="secondary" disabled style={{ position:'relative', zIndex:1, width:'100%', opacity:.7 }}>⏳ Solicitud enviada</button>
-                          ) : (
-                            <button className="primary" onClick={() => enviarSolicitudAmistad(usuario)} style={{ position:'relative', zIndex:1, width:'100%' }}>✨ Añadir amigo</button>
-                          )}
-                        </div>
-                      )
+                          </article>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <div className="wgx-empty-state">
+<div className="empty-symbol">⌕</div>
+<h3>No hay coincidencias</h3>
+<p>Prueba con otro nombre de usuario.</p>
+</div>
+                  )}
+                </section>
+              )}
+
+              {solicitudesRecibidas.length > 0 && (
+                <section className="wgx-request-section">
+                  <div className="wgx-section-heading">
+<div>
+<span className="wgx-section-kicker">03 · TU BANDEJA</span>
+<h2>Quieren entrar en tu círculo</h2>
+</div>
+<span className="wgx-heading-count gold">{solicitudesRecibidas.length}</span>
+</div>
+                  <div className="wgx-request-rail">
+                    {solicitudesRecibidas.map((usuarioId) => {
+                      const usuario = friends.find((f) => f.id === usuarioId)
+                      if (!usuario) return null
+                      return <article className="wgx-request-card" key={usuarioId}>
+<div className="wgx-request-avatar">{usuario.avatar}</div>
+<div className="wgx-request-info">
+<span>SOLICITUD DE AMISTAD</span>
+<strong>{usuario.name}</strong>
+<small>Quiere formar parte de tu círculo.</small>
+</div>
+<div className="wgx-request-actions">
+<button className="wgx-action primary" onClick={() => aceptarSolicitud(usuarioId)}>ACEPTAR ✓</button>
+<button className="wgx-action ghost" onClick={() => rechazarSolicitud(usuarioId)}>AHORA NO</button>
+</div>
+</article>
                     })}
                   </div>
-                ) : (
-                  <div style={{ padding:'34px 24px', textAlign:'center', borderRadius:24, background:'rgba(255,255,255,.035)', border:'1px solid rgba(255,255,255,.07)', color:'rgba(255,255,255,.55)' }}>
-                    <div style={{ fontSize:42, marginBottom:8 }}>🔍</div>
-                    <strong style={{ display:'block', color:'rgba(255,255,255,.85)', marginBottom:6 }}>No hemos encontrado a nadie</strong>
-                    <span>Prueba con otro nombre de usuario.</span>
+                </section>
+              )}
+
+              <section className="wgx-circle-section">
+                <div className="wgx-section-heading circle-heading">
+<div>
+<span className="wgx-section-kicker">04 · TU NÚCLEO</span>
+<h2>El círculo <em>WeGeek</em>
+</h2>
+<p>Entra en cualquier perfil para descubrir sus películas, series y sala de trofeos.</p>
+</div>
+<div className="wgx-circle-count">
+<strong>{amigosActuales.length}</strong>
+<span>CONEXIONES</span>
+</div>
+</div>
+                {amigosActuales.length > 0 ? (
+                  <div className="wgx-friend-grid">
+                    {friends.filter((amigo) => amigosActuales.includes(amigo.id)).map((amigo, index) => (
+                      <article className={`wgx-friend-card wgx-friend-card-v2 ${amigo.status === 'Online' ? 'is-online' : ''}`} key={amigo.id || amigo.name}>
+                        <div className="wgx-friend-card-bg" />
+                        <div className="wgx-friend-card-glow" />
+                        <div className="wgx-friend-orbit orbit-one" />
+                        <div className="wgx-friend-orbit orbit-two" />
+                        <div className="wgx-friend-topline">
+                          <span>CONNECTION <b>#{String(index + 1).padStart(2,'0')}</b></span>
+                          <span className={amigo.status === 'Online' ? 'online' : ''}><i /> {amigo.status || 'OFFLINE'}</span>
+                        </div>
+                        <button className="wgx-friend-avatar wgx-friend-avatar-v2" onClick={() => abrirPerfil(amigo)} aria-label={`Abrir perfil de ${amigo.name}`}>
+                          <span className="avatar-halo" />
+                          <span className="avatar-core">{amigo.avatar}</span>
+                        </button>
+                        <div className="wgx-friend-identity-v2">
+                          <span className="wgx-friend-label">WEGEEKTV · TU CÍRCULO</span>
+                          <button className="wgx-friend-name wgx-friend-name-v2" onClick={() => abrirPerfil(amigo)}>{amigo.name}<small>.</small></button>
+                          <div className="wgx-friend-subline"><span>✦</span> EXPLORA SU UNIVERSO <span>✦</span></div>
+                        </div>
+                        <div className="wgx-friend-metrics-v2">
+                          <div><strong>{amigo.movies}</strong><span>PELÍCULAS</span></div>
+                          <div><strong>{amigo.series}</strong><span>SERIES</span></div>
+                          <div><strong>↗</strong><span>PERFIL</span></div>
+                        </div>
+                        <div className="wgx-friend-now-v2">
+                          <span>✦ AHORA EN SU UNIVERSO</span>
+                          <strong>{amigo.watching || 'Explorando qué ver...'}</strong>
+                        </div>
+                        <div className="wgx-friend-actions wgx-friend-actions-v2">
+                          <button className="wgx-action primary" onClick={() => abrirPerfil(amigo)}>ENTRAR EN SU UNIVERSO <span>↗</span></button>
+                          <button className="wgx-remove" onClick={() => eliminarAmigo(amigo.id)} title={`Quitar a ${amigo.name}`}>×</button>
+                        </div>
+                      </article>
+                    ))}
                   </div>
+                ) : (
+                  <div className="wgx-empty-state mega">
+<div className="wgx-empty-orbit">
+<span>👥</span>
+</div>
+<span className="wgx-section-kicker">TU UNIVERSO ESTÁ ESPERANDO</span>
+<h3>Haz crecer tu círculo.</h3>
+<p>Busca a otros usuarios arriba y convierte sus perfiles en nuevas historias compartidas.</p>
+<button className="wgx-action primary" onClick={() => document.querySelector<HTMLInputElement>('.wgx-search-field input')?.focus()}>BUSCAR AMIGOS <span>↓</span>
+</button>
+</div>
                 )}
               </section>
-            )}
 
-            {solicitudesRecibidas.length > 0 && (
-              <section className="section" style={{ position:'relative', zIndex:1 }}>
-                <div className="section-title"><h2 style={{ fontSize:26 }}>📨 Solicitudes pendientes</h2><span className="movie-count">{solicitudesRecibidas.length}</span></div>
-                <div className="cards">
-                  {solicitudesRecibidas.map((usuarioId) => {
-                    const usuario = friends.find((f) => f.id === usuarioId)
-                    if (!usuario) return null
-                    return (
-                      <div className="card" key={usuarioId} style={{ borderRadius:24, background:'linear-gradient(145deg, rgba(255,196,72,.11), rgba(255,92,192,.07), rgba(255,255,255,.035))', border:'1px solid rgba(255,255,255,.12)' }}>
-                        <div className="poster" style={{ width:78, height:78, borderRadius:24, fontSize:36, display:'grid', placeItems:'center', margin:'0 auto 14px' }}>{usuario.avatar}</div>
-                        <h3 style={{ fontSize:21 }}>{usuario.name}</h3>
-                        <p>Quiere formar parte de tu círculo.</p>
-                        <div style={{ display:'flex', gap:'8px', flexWrap:'wrap' }}>
-                          <button className="primary" onClick={() => aceptarSolicitud(usuarioId)} style={{ flex:1 }}>✅ Aceptar</button>
-                          <button className="secondary" onClick={() => rechazarSolicitud(usuarioId)} style={{ flex:1 }}>Rechazar</button>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </section>
-            )}
-
-            <section className="section" style={{ position:'relative', zIndex:1, marginTop:32 }}>
-              <div className="section-title"><h2 style={{ fontSize:28 }}>🤝 Tu círculo</h2><span className="movie-count">{amigosActuales.length}</span></div>
-              {amigosActuales.length > 0 ? (
-                <div className="cards">
-                  {friends.filter((amigo) => amigosActuales.includes(amigo.id)).map((amigo) => (
-                    <div className="card" key={amigo.name} style={{ position:'relative', overflow:'hidden', borderRadius:28, padding:'22px', background:'linear-gradient(145deg, rgba(255,255,255,.075), rgba(255,255,255,.025))', border:'1px solid rgba(255,255,255,.1)', boxShadow:'0 20px 55px rgba(0,0,0,.23)', transition:'transform .2s ease, box-shadow .2s ease' }}>
-                      <div style={{ position:'absolute', inset:'auto -30px -55px auto', width:160, height:160, borderRadius:'50%', background: amigo.status === 'Online' ? 'rgba(74,222,128,.12)' : 'rgba(142,142,255,.08)', filter:'blur(28px)' }} />
-                      <div onClick={() => abrirPerfil(amigo)} style={{ cursor:'pointer', position:'relative', zIndex:1 }}>
-                        <div style={{ display:'flex', alignItems:'center', gap:16, textAlign:'left' }}>
-                          <div className="poster" style={{ flex:'0 0 76px', width:76, height:76, borderRadius:24, fontSize:36, display:'grid', placeItems:'center', background:'linear-gradient(135deg, rgba(255,255,255,.11), rgba(255,255,255,.035))', border:'1px solid rgba(255,255,255,.12)' }}>{amigo.avatar}</div>
-                          <div style={{ minWidth:0, flex:1 }}>
-                            <h3 style={{ margin:'0 0 6px', fontSize:22, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{amigo.name}</h3>
-                            <div style={{ display:'flex', alignItems:'center', gap:7, fontSize:12, color: amigo.status === 'Online' ? '#70f3a1' : 'rgba(255,255,255,.42)', fontWeight:700, textTransform:'uppercase', letterSpacing:'.08em' }}><span style={{ width:8, height:8, borderRadius:'50%', background: amigo.status === 'Online' ? '#4ade80' : '#777', boxShadow: amigo.status === 'Online' ? '0 0 12px #4ade80' : 'none' }} />{amigo.status}</div>
-                          </div>
-                        </div>
-                        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginTop:20 }}>
-                          <div style={{ padding:'13px 12px', borderRadius:17, background:'rgba(255,255,255,.045)', border:'1px solid rgba(255,255,255,.06)' }}><strong style={{ display:'block', fontSize:21 }}>{amigo.movies}</strong><span style={{ fontSize:10, color:'rgba(255,255,255,.42)', textTransform:'uppercase', letterSpacing:'.1em' }}>Películas</span></div>
-                          <div style={{ padding:'13px 12px', borderRadius:17, background:'rgba(255,255,255,.045)', border:'1px solid rgba(255,255,255,.06)' }}><strong style={{ display:'block', fontSize:21 }}>{amigo.series}</strong><span style={{ fontSize:10, color:'rgba(255,255,255,.42)', textTransform:'uppercase', letterSpacing:'.1em' }}>Series</span></div>
-                        </div>
-                        <div style={{ marginTop:10, padding:'12px 14px', borderRadius:16, background:'linear-gradient(90deg, rgba(255,82,204,.08), rgba(111,103,255,.06))', color:'rgba(255,255,255,.62)', fontSize:12, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>🎬 {amigo.watching || 'Explorando qué ver...'}</div>
-                      </div>
-                      <button className="secondary" onClick={() => eliminarAmigo(amigo.id)} style={{ position:'relative', zIndex:1, width:'100%', marginTop:14, opacity:.72 }}>Quitar amigo</button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div style={{ position:'relative', overflow:'hidden', minHeight:330, display:'grid', placeItems:'center', textAlign:'center', borderRadius:32, padding:30, background:'radial-gradient(circle at 50% 40%, rgba(255,77,205,.12), transparent 34%), radial-gradient(circle at 70% 70%, rgba(91,89,255,.1), transparent 32%), rgba(255,255,255,.025)', border:'1px solid rgba(255,255,255,.08)', boxShadow:'inset 0 1px 0 rgba(255,255,255,.05)' }}>
-                  <div>
-                    <div style={{ fontSize:76, marginBottom:12, filter:'drop-shadow(0 0 25px rgba(255,84,207,.35))' }}>👥</div>
-                    <h2 style={{ margin:'0 0 8px', fontSize:30, background:'linear-gradient(90deg,#fff,#ff79d5,#9692ff)', WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent' }}>Tu círculo está esperando</h2>
-                    <p style={{ margin:'0 auto', maxWidth:480, color:'rgba(255,255,255,.48)', lineHeight:1.6 }}>Busca a otros usuarios de WeGeekTV arriba. Cuando aceptéis la solicitud, podréis descubrir vuestras estadísticas y vitrinas.</p>
-                  </div>
-                </div>
-              )}
-            </section>
+              <footer className="wgx-friends-footer">
+<span>W G T</span>
+<i>✦</i>
+<strong>YOUR PEOPLE. YOUR STORIES.</strong>
+<i>✦</i>
+<span>WEGEEKTV</span>
+</footer>
+            </div>
           </section>
         )}
 
@@ -5316,11 +5675,26 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
               return (
                 <>
                   <div className="stats">
-                    <div className="stat"><strong>{vistasTMDB.length}</strong><span>Películas vistas</span></div>
-                    <div className="stat"><strong>{vistasSeriesTMDB.length}</strong><span>Series vistas</span></div>
-                    <div className="stat"><strong>{(Object.values(episodiosVistos) as TmdbEpisode[][]).reduce((total, episodios) => total + (Array.isArray(episodios) ? episodios.length : 0), 0)}</strong><span>Episodios vistos</span></div>
-                    <div className="stat"><strong>{favoritasTMDB.length + favoritasSeriesTMDB.length}</strong><span>Favoritos ❤️</span></div>
-                    <div className="stat"><strong>{formatearTiempo}</strong><span>Tiempo visto</span></div>
+                    <div className="stat">
+<strong>{vistasTMDB.length}</strong>
+<span>Películas vistas</span>
+</div>
+                    <div className="stat">
+<strong>{vistasSeriesTMDB.length}</strong>
+<span>Series vistas</span>
+</div>
+                    <div className="stat">
+<strong>{(Object.values(episodiosVistos) as TmdbEpisode[][]).reduce((total, episodios) => total + (Array.isArray(episodios) ? episodios.length : 0), 0)}</strong>
+<span>Episodios vistos</span>
+</div>
+                    <div className="stat">
+<strong>{favoritasTMDB.length + favoritasSeriesTMDB.length}</strong>
+<span>Favoritos ❤️</span>
+</div>
+                    <div className="stat">
+<strong>{formatearTiempo}</strong>
+<span>Tiempo visto</span>
+</div>
                   </div>
 
                   <section className="section">
@@ -5368,18 +5742,29 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
         )}
 
         {pagina === 'perfil' && amigoSeleccionado && (
-          <section className="welcome" style={{ position:'relative', overflow:'hidden', paddingBottom:80 }}>
-            <div style={{ position:'absolute', inset:'-120px -20% auto', height:480, background:'radial-gradient(circle at 20% 30%,rgba(255,79,154,.22),transparent 32%),radial-gradient(circle at 75% 20%,rgba(101,91,255,.24),transparent 30%),radial-gradient(circle at 50% 80%,rgba(79,215,255,.12),transparent 30%)', filter:'blur(12px)', pointerEvents:'none' }} />
-            <div style={{ position:'relative', zIndex:1 }}>
-              <button className="secondary" onClick={volverAmigos}>← Volver a amigos</button>
-              {cargandoPerfilAmigo && (
-                <div style={{ marginTop:30, padding:50, textAlign:'center', borderRadius:30, background:'rgba(255,255,255,.04)', border:'1px solid rgba(255,255,255,.08)' }}>
-                  <div style={{ fontSize:48, marginBottom:12 }}>✦</div><h2>Cargando el universo de {amigoSeleccionado.name}…</h2><p style={{ opacity:.55 }}>Estamos recuperando su colección, series y logros.</p>
-                </div>
-              )}
-              {errorPerfilAmigo && !cargandoPerfilAmigo && (
-                <div style={{ marginTop:25, padding:24, borderRadius:22, background:'rgba(255,70,100,.08)', border:'1px solid rgba(255,70,100,.2)' }}><strong>No se ha podido cargar el perfil.</strong><p style={{ opacity:.65 }}>{errorPerfilAmigo}</p></div>
-              )}
+          <section className="wgx-profile-page">
+            <div className="wgx-profile-aurora aurora-pink" />
+            <div className="wgx-profile-aurora aurora-blue" />
+            <div className="wgx-profile-stars">✦　·　✧　·　✦　·　·　✧　·　✦</div>
+            <div className="wgx-profile-shell">
+              <div className="wgx-profile-nav">
+<button className="wgx-back-button" onClick={volverAmigos}>← VOLVER AL CÍRCULO</button>
+<span>WEGEEKTV <b>•</b> AMIGOS <b>•</b> PERFIL</span>
+</div>
+              <div className="wgx-profile-loading">
+                {cargandoPerfilAmigo && <div className="wgx-profile-loader">
+<div className="wgx-loader-orbit">
+<i>✦</i>
+</div>
+<span>RECUPERANDO UNIVERSO</span>
+<strong>Preparando el perfil de {amigoSeleccionado.name}...</strong>
+</div>}
+                {errorPerfilAmigo && !cargandoPerfilAmigo && <div className="wgx-profile-error">
+<span>!</span>
+<strong>No se ha podido cargar el perfil</strong>
+<p>{errorPerfilAmigo}</p>
+</div>}
+              </div>
               {!cargandoPerfilAmigo && !errorPerfilAmigo && amigoPerfilData && (() => {
                 const data = amigoPerfilData
                 const logros = data.achievements
@@ -5393,53 +5778,164 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 const horas = Math.floor((minutosPeliculas + minutosEpisodios) / 60)
                 return (
                   <>
-                    <div style={{ marginTop:30, padding:'32px', borderRadius:34, background:'linear-gradient(135deg,rgba(255,255,255,.085),rgba(255,79,154,.09),rgba(90,94,255,.09))', border:'1px solid rgba(255,255,255,.13)', boxShadow:'0 25px 80px rgba(0,0,0,.25)' }}>
-                      <div style={{ display:'flex', gap:24, alignItems:'center', flexWrap:'wrap' }}>
-                        <div className="big-avatar" style={{ width:100, height:100, flex:'0 0 100px', fontSize:48 }}>{amigoSeleccionado.avatar}</div>
-                        <div style={{ flex:1, minWidth:220 }}><p className="small-title">PERFIL DE AMIGO</p><h1 style={{ margin:'4px 0', fontSize:'clamp(38px,6vw,70px)' }}>{amigoSeleccionado.name}</h1><span style={{ color:'#70f3a1', fontSize:12, fontWeight:800 }}>● MIEMBRO DE WEGEEKTV</span></div>
-                      </div>
-                      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))', gap:12, marginTop:28 }}>
-                        {[[data.movies.length,'🎬','Películas'],[data.series.length,'📺','Series'],[episodiosTotales,'▶️','Episodios'],[amigoSeleccionado.favorites,'❤️','Favoritos'],[conseguidos.length,'🏆','Logros'],[diamantes,'💎','Diamantes']].map(([value,icon,label]) => <div key={String(label)} style={{ padding:'16px 12px', borderRadius:19, background:'rgba(0,0,0,.18)', border:'1px solid rgba(255,255,255,.07)', textAlign:'center' }}><div style={{ fontSize:18 }}>{icon}</div><strong style={{ display:'block', fontSize:25, marginTop:5 }}>{value}</strong><span style={{ fontSize:9, opacity:.48, textTransform:'uppercase', letterSpacing:'.1em' }}>{label}</span></div>)}
-                      </div>
-                    </div>
+                    <header className="wgx-profile-hero">
+                      <div className="wgx-profile-hero-grid" />
+                      <div className="wgx-profile-rings">
+<i/>
+<i/>
+<i/>
+</div>
+                      <div className="wgx-profile-code">PROFILE / {String(amigoSeleccionado.id).slice(0,8).toUpperCase()} / WGT</div>
+                      <div className="wgx-profile-identity-block">
+                        <div className="wgx-profile-avatar-wrap">
+<div className="wgx-profile-avatar-ring r1"/>
+<div className="wgx-profile-avatar-ring r2"/>
+<div className="wgx-profile-avatar">{amigoSeleccionado.avatar}</div>
+<span className="wgx-profile-online">● ONLINE</span>
+</div>
+                        <div className="wgx-profile-identity-copy">
+<span className="wgx-section-kicker">PERFIL DE AMIGO · MEMBER 0{amigoSeleccionado.id ? String(amigoSeleccionado.id).slice(-1) : '1'}</span>
+<h1>{amigoSeleccionado.name}<small>.</small>
+</h1>
+<p>
+<i/> MIEMBRO DE WEGEEKTV <b>·</b> EXPLORANDO SU UNIVERSO</p>
+<div className="wgx-profile-tags">
+<span>🎬 CINE</span>
+<span>📺 SERIES</span>
+<span>🏆 TROFEOS</span>
+<span>💎 PROGRESO</span>
+</div>
 
-                    <section className="section" style={{ marginTop:28 }}>
-                      <div className="section-title"><h2>🏆 Su vitrina</h2><span className="movie-count">{conseguidos.length} conquistadas</span></div>
+
+
+
+
+</div>
+                      </div>
+                      <div className="wgx-profile-signature">WEGEEKTV <span>✦</span> SOCIAL PROFILE</div>
+                    </header>
+
+                    <section className="wgx-profile-dashboard wgx-profile-dashboard-v2">
+                      <div className="wgx-profile-dashboard-title">
+<div>
+<span className="wgx-section-kicker">01 · OVERVIEW</span>
+<h2>Su universo en <em>números</em></h2>
+<p className="wgx-overview-subtitle">Cuatro señales. Una historia. Todo lo importante de un vistazo.</p>
+</div>
+<span className="wgx-overview-live"><i /> PERFIL EN VIVO</span>
+</div>
+                      <div className="wgx-profile-main-stats">
+                        <div className="wgx-main-stat" data-tone="pink">
+<span>◈</span>
+<strong>{data.movies.length + data.series.length}</strong>
+<small>TÍTULOS REGISTRADOS</small>
+</div>
+                        <div className="wgx-main-stat" data-tone="cyan">
+<span>▶</span>
+<strong>{episodiosTotales}</strong>
+<small>EPISODIOS VISTOS</small>
+</div>
+                        <div className="wgx-main-stat" data-tone="gold">
+<span>✦</span>
+<strong>{conseguidos.length}</strong>
+<small>CONQUISTAS</small>
+</div>
+                        <div className="wgx-main-stat" data-tone="violet">
+<span>◷</span>
+<strong>{horas}h</strong>
+<small>TIEMPO REGISTRADO</small>
+</div>
+                      </div>
+                    </section>
+
+                    <section className="wgx-profile-trophy">
+                      <div className="wgx-profile-section-head">
+<div>
+<span className="wgx-section-kicker">02 · TROPHY ROOM</span>
+<h2>Su <em>vitrina</em>
+</h2>
+<p>Las conquistas que definen su viaje.</p>
+</div>
+<div className="wgx-trophy-total">
+<strong>{conseguidos.length}</strong>
+<span>DESBLOQUEADAS</span>
+</div>
+</div>
                       {protagonista && protagonista.tierIndex >= 0 ? (
-                        <>
-                          <div style={{ display:'grid', gridTemplateColumns:'minmax(0,1.3fr) minmax(220px,.7fr)', gap:18, alignItems:'stretch' }}>
-                            <div style={{ minHeight:330, borderRadius:32, display:'grid', placeItems:'center', position:'relative', overflow:'hidden', background:`radial-gradient(circle,${ACHIEVEMENT_TIER_GLOWS[protagonista.tierIndex]},transparent 55%),rgba(255,255,255,.035)`, border:`1px solid ${ACHIEVEMENT_TIER_COLORS[protagonista.tierIndex]}55`, boxShadow:`0 0 60px ${ACHIEVEMENT_TIER_GLOWS[protagonista.tierIndex]}` }}>
-                              <div style={{ textAlign:'center' }}><div style={{ width:240, height:240, margin:'0 auto' }}><AchievementBadge achievement={protagonista} tierIndex={protagonista.tierIndex} size={240} effects /></div><h3 style={{ fontSize:24, margin:'-4px 0 4px' }}>{protagonista.name}</h3><span style={{ color:ACHIEVEMENT_TIER_COLORS[protagonista.tierIndex], fontWeight:900, textTransform:'uppercase', fontSize:11 }}>{ACHIEVEMENT_TIER_NAMES[protagonista.tierIndex]}</span></div>
-                            </div>
-                            <div style={{ display:'grid', gridTemplateRows:'repeat(3,1fr)', gap:12 }}>
-                              {[['🏆',conseguidos.length,'Logros desbloqueados'],['💎',diamantes,'Diamantes'],['⚡',`${Math.round(logros.reduce((n,a) => n + Math.max(0,a.tierIndex+1),0)/(logros.length*5)*100)}%`,'Progreso total']].map(([icon,value,label]) => <div key={String(label)} style={{ padding:22, borderRadius:24, background:'rgba(255,255,255,.045)', border:'1px solid rgba(255,255,255,.08)' }}><span style={{ fontSize:25 }}>{icon}</span><strong style={{ display:'block', fontSize:30, marginTop:8 }}>{value}</strong><span style={{ opacity:.48, fontSize:10, textTransform:'uppercase', letterSpacing:'.1em' }}>{label}</span></div>)}
-                            </div>
-                          </div>
-                          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:14, marginTop:18 }}>
-                            {conseguidos.map((logro) => <div key={logro.id} style={{ minHeight:240, position:'relative', borderRadius:26, overflow:'hidden', display:'grid', placeItems:'center', background:`radial-gradient(circle,${ACHIEVEMENT_TIER_GLOWS[logro.tierIndex]},transparent 55%),rgba(255,255,255,.035)`, border:`1px solid ${ACHIEVEMENT_TIER_COLORS[logro.tierIndex]}45` }}><div style={{ width:180, height:180 }}><AchievementBadge achievement={logro} tierIndex={logro.tierIndex} size={180} effects /></div><strong style={{ position:'absolute', bottom:13, left:10, right:10, textAlign:'center', fontSize:12, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{logro.name}</strong></div>)}
-                          </div>
-                        </>
-                      ) : <div style={{ padding:45, textAlign:'center', borderRadius:28, background:'rgba(255,255,255,.035)', border:'1px dashed rgba(255,255,255,.12)' }}><div style={{ fontSize:70 }}>🏆</div><h3>Aún no tiene medallas</h3><p style={{ opacity:.5 }}>Su vitrina está esperando la primera conquista.</p></div>}
+                        <div className="wgx-trophy-layout">
+                          <div className="wgx-trophy-feature" data-tier={protagonista.tierIndex}>
+<div className="wgx-trophy-feature-glow"/>
+<span className="wgx-trophy-rank">MEDALLA DESTACADA · {ACHIEVEMENT_TIER_NAMES[protagonista.tierIndex]}</span>
+<div className="wgx-trophy-badge">
+<AchievementBadge achievement={protagonista} tierIndex={protagonista.tierIndex} size={270} effects />
+</div>
+<h3>{protagonista.name}</h3>
+<span className="wgx-tier-name" style={{color:ACHIEVEMENT_TIER_COLORS[protagonista.tierIndex]}}>{ACHIEVEMENT_TIER_NAMES[protagonista.tierIndex]}</span>
+</div>
+                          <div className="wgx-trophy-side">{[['🏆',conseguidos.length,'LOGROS'],['💎',diamantes,'DIAMANTES'],['⚡',`${Math.round(logros.reduce((n,a) => n + Math.max(0,a.tierIndex+1),0)/(logros.length*5)*100)}%`,'PROGRESO']].map(([icon,value,label]) => <div key={String(label)}>
+<span>{icon}</span>
+<strong>{value}</strong>
+<small>{label}</small>
+</div>)}</div>
+                        </div>
+                      ) : <div className="wgx-no-trophies">
+<span>🏆</span>
+<strong>Su vitrina todavía está vacía.</strong>
+<small>La primera conquista está esperando.</small>
+</div>}
+                      {conseguidos.length > 0 && <div className="wgx-trophy-strip">{conseguidos.map((logro) => <div className="wgx-trophy-card" key={logro.id}>
+<div>
+<AchievementBadge achievement={logro} tierIndex={logro.tierIndex} size={155} effects />
+</div>
+<strong>{logro.name}</strong>
+<span style={{color:ACHIEVEMENT_TIER_COLORS[logro.tierIndex]}}>{ACHIEVEMENT_TIER_NAMES[logro.tierIndex]}</span>
+</div>)}</div>}
                     </section>
 
-                    <section className="section" style={{ marginTop:28 }}>
-                      <div className="section-title"><h2>🎬 Sus películas</h2><span className="movie-count">{data.movies.length}</span></div>
-                      {data.movies.length ? <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))', gap:16 }}>{data.movies.slice(0,24).map((movie) => <div key={movie.id} style={{ borderRadius:18, overflow:'hidden', background:'rgba(255,255,255,.045)', border:'1px solid rgba(255,255,255,.08)' }}>{movie.poster_path ? <img src={`${TMDB_IMAGE_URL}${movie.poster_path}`} alt={movie.title} style={{ width:'100%', aspectRatio:'2/3', objectFit:'cover', display:'block' }} /> : <div style={{ aspectRatio:'2/3', display:'grid', placeItems:'center', fontSize:38 }}>🎬</div>}<div style={{ padding:10 }}><strong style={{ display:'block', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{movie.title}</strong><span style={{ opacity:.5, fontSize:11 }}>{movie.release_date?.slice(0,4) || '—'}</span></div></div>)}</div> : <p style={{ opacity:.5 }}>Todavía no tiene películas vistas.</p>}
-                      {data.movies.length > 24 && <p style={{ textAlign:'center', opacity:.45, fontSize:12, marginTop:16 }}>Mostrando 24 de {data.movies.length} películas.</p>}
+                    <section className="wgx-profile-library">
+                      <div className="wgx-profile-section-head">
+<div>
+<span className="wgx-section-kicker">03 · COLLECTION</span>
+<h2>Lo que está <em>viendo</em>
+</h2>
+<p>Una mirada a su colección personal.</p>
+</div>
+</div>
+                      <div className="wgx-library-block">
+<div className="wgx-library-title">
+<h3>🎬 Películas</h3>
+<span>{data.movies.length} TÍTULOS</span>
+</div>{data.movies.length ? <div className="wgx-library-grid">{data.movies.slice(0,24).map((movie) => <article className="wgx-media-card" key={movie.id}>{movie.poster_path ? <img src={`${TMDB_IMAGE_URL}${movie.poster_path}`} alt={movie.title} /> : <div className="wgx-media-placeholder">🎬</div>}<div className="wgx-media-overlay"/>
+<div className="wgx-media-info">
+<strong>{movie.title}</strong>
+<span>{movie.release_date?.slice(0,4) || '—'}</span>
+</div>
+</article>)}</div> : <div className="wgx-library-empty">Todavía no tiene películas vistas.</div>}</div>
+                      <div className="wgx-library-block">
+<div className="wgx-library-title">
+<h3>📺 Series</h3>
+<span>{data.series.length} TÍTULOS</span>
+</div>{data.series.length ? <div className="wgx-library-grid series-grid">{data.series.slice(0,24).map((serie) => { const vistos = data.episodes[String(serie.id)]?.length || 0; return <article className="wgx-media-card" key={serie.id}>{serie.poster_path ? <img src={`${TMDB_IMAGE_URL}${serie.poster_path}`} alt={serie.name} /> : <div className="wgx-media-placeholder">📺</div>}<div className="wgx-media-overlay"/>
+<div className="wgx-media-info">
+<strong>{serie.name}</strong>
+<span>{serie.first_air_date?.slice(0,4) || '—'} · {vistos} EPISODIOS</span>
+</div>
+</article> })}</div> : <div className="wgx-library-empty">Todavía no tiene series vistas.</div>}</div>
                     </section>
 
-                    <section className="section" style={{ marginTop:28 }}>
-                      <div className="section-title"><h2>📺 Sus series</h2><span className="movie-count">{data.series.length}</span></div>
-                      {data.series.length ? <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(170px,1fr))', gap:16 }}>{data.series.slice(0,24).map((serie) => { const vistos = data.episodes[String(serie.id)]?.length || 0; return <div key={serie.id} style={{ borderRadius:18, overflow:'hidden', background:'rgba(255,255,255,.045)', border:'1px solid rgba(255,255,255,.08)' }}>{serie.poster_path ? <img src={`${TMDB_IMAGE_URL}${serie.poster_path}`} alt={serie.name} style={{ width:'100%', aspectRatio:'2/3', objectFit:'cover', display:'block' }} /> : <div style={{ aspectRatio:'2/3', display:'grid', placeItems:'center', fontSize:38 }}>📺</div>}<div style={{ padding:10 }}><strong style={{ display:'block', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{serie.name}</strong><span style={{ opacity:.5, fontSize:11 }}>{serie.first_air_date?.slice(0,4) || '—'} · {vistos} episodios</span></div></div> })}</div> : <p style={{ opacity:.5 }}>Todavía no tiene series vistas.</p>}
-                    </section>
-
-                    <section style={{ marginTop:28, padding:22, borderRadius:26, background:'linear-gradient(135deg,rgba(255,79,154,.08),rgba(91,107,255,.07))', border:'1px solid rgba(255,255,255,.08)' }}><strong>⏱️ Tiempo registrado</strong><p style={{ margin:'8px 0 0', opacity:.55 }}>{horas > 0 ? `${horas} horas` : 'Aún no hay suficiente información de duración para calcularlo.'}</p></section>
+                    <footer className="wgx-profile-footer">
+<div className="wgx-profile-footer-line"/>
+<span>END OF PROFILE</span>
+<strong>{amigoSeleccionado.name}</strong>
+<small>WEGEEKTV · FRIEND UNIVERSE</small>
+</footer>
                   </>
                 )
               })()}
             </div>
           </section>
         )}
+
       </main>
     </div>
   )
