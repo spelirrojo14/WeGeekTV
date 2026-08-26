@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { buscarPeliculas } from './tmdb'
 import Auth from './components/Auth'
@@ -468,7 +468,7 @@ function AchievementBadge({ achievement, tierIndex, locked = false, size = 150, 
         {effects && (
           <>
             <span aria-hidden="true" style={{ position:'absolute', inset:'-9%', borderRadius:'50%', background:`radial-gradient(circle, ${glow} 0%, transparent 67%)`, filter:'blur(12px)', animation:'wgMedalAuraPulse 2.6s ease-in-out infinite', opacity: locked ? .12 : .38, pointerEvents:'none', zIndex:0 }} />
-            <span aria-hidden="true" style={{ position:'absolute', inset:'-5%', borderRadius:'50%', border:`1px solid ${color}88`, background:`conic-gradient(from 0deg, transparent 0deg, ${color}aa 55deg, transparent 105deg, transparent 220deg, ${color}77 285deg, transparent 330deg)`, WebkitMask:'radial-gradient(circle, transparent 63%, #000 65%, #000 69%, transparent 71%)', mask:'radial-gradient(circle, transparent 63%, #000 65%, #000 69%, transparent 71%)', animation:'wgMedalOrbit 7s linear infinite', opacity: locked ? .25 : .8, pointerEvents:'none', zIndex:1 }} />
+            <span aria-hidden="true" style={{ position:'absolute', inset:'-5%', borderRadius:'50%', border:`1px solid ${color}88`, background:`conic-gradient(from 0deg, transparent 0deg, ${color}aa 55deg, transparent 105deg, transparent 220deg, ${color}77 285deg, transparent 330deg)`, animation:'wgMedalOrbit 7s linear infinite', opacity: locked ? .25 : .8, pointerEvents:'none', zIndex:1 }} />
             <span aria-hidden="true" style={{ position:'absolute', inset:'-2%', borderRadius:'50%', border:`1px dashed ${color}55`, animation:'wgMedalOrbitReverse 11s linear infinite', opacity: locked ? .18 : .48, pointerEvents:'none', zIndex:1 }} />
             <span aria-hidden="true" style={{ position:'absolute', top:'7%', left:'-18%', width:'34%', height:'14%', borderRadius:999, background:`linear-gradient(90deg, transparent, rgba(255,255,255,.92), ${color}, transparent)`, filter:'blur(2px)', transform:'translateX(-140%) rotate(18deg)', animation:'wgMedalShimmer 3.8s ease-in-out infinite', pointerEvents:'none', zIndex:4 }} />
             {!locked && [0,1,2,3].map((i) => (
@@ -478,7 +478,7 @@ function AchievementBadge({ achievement, tierIndex, locked = false, size = 150, 
               <span aria-hidden="true" style={{ position:'absolute', inset:'-13%', borderRadius:'50%', border:`2px solid ${color}55`, boxShadow:`0 0 28px ${glow}`, animation:'wgMedalRingPulse 3.2s ease-in-out infinite', pointerEvents:'none', zIndex:0 }} />
             )}
             {!locked && tier >= 2 && (
-              <span aria-hidden="true" style={{ position:'absolute', inset:'-20%', borderRadius:'50%', background:`repeating-conic-gradient(from 0deg, ${color}00 0deg, ${color}55 4deg, ${color}00 9deg, ${color}00 18deg)`, mask:'radial-gradient(circle, transparent 61%, #000 63%, #000 68%, transparent 70%)', WebkitMask:'radial-gradient(circle, transparent 61%, #000 63%, #000 68%, transparent 70%)', animation:'wgMedalRaySpin 12s linear infinite', opacity:.72, pointerEvents:'none', zIndex:0 }} />
+              <span aria-hidden="true" style={{ position:'absolute', inset:'-20%', borderRadius:'50%', background:`repeating-conic-gradient(from 0deg, ${color}00 0deg, ${color}55 4deg, ${color}00 9deg, ${color}00 18deg)`, animation:'wgMedalRaySpin 12s linear infinite', opacity:.72, pointerEvents:'none', zIndex:0 }} />
             )}
             {!locked && tier >= 3 && (
               <span aria-hidden="true" style={{ position:'absolute', inset:'-27%', borderRadius:'50%', border:`1px dotted ${color}70`, animation:'wgMedalOrbitReverse 8s linear infinite', boxShadow:`0 0 34px ${glow}`, pointerEvents:'none', zIndex:0 }} />
@@ -578,6 +578,17 @@ async function fetchTMDBSafe(
   }
 }
 
+const esAvatarImagen = (avatar?: string | null) => !!avatar && /^(https?:\/\/|data:image\/)/i.test(avatar)
+
+function AvatarVisual({ value, className = '' }: { value?: string | null; className?: string }) {
+  const avatar = value || '👤'
+  return esAvatarImagen(avatar) ? (
+    <img className={className} src={avatar} alt="Foto de perfil" loading="lazy" onError={(e) => { e.currentTarget.style.display = 'none' }} />
+  ) : (
+    <span className={className}>{avatar}</span>
+  )
+}
+
 function App() {
   const [session, setSession] = useState<any>(null)
   useEffect(() => {
@@ -612,6 +623,9 @@ function App() {
   const [nombreUsuario, setNombreUsuario] = useState('Usuario')
   const [avatarUsuario, setAvatarUsuario] = useState('👤')
   const [editandoPerfil, setEditandoPerfil] = useState(false)
+  const [subiendoAvatar, setSubiendoAvatar] = useState(false)
+  const avatarFileInputRef = useRef<HTMLInputElement | null>(null)
+  const [errorAvatar, setErrorAvatar] = useState('')
   const [busquedaAmigos, setBusquedaAmigos] = useState('')
   const [usuariosBusqueda, setUsuariosBusqueda] = useState<Friend[]>([])
   const [buscandoUsuarios, setBuscandoUsuarios] = useState(false)
@@ -1660,6 +1674,46 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
     setAvatarUsuario(nuevoAvatar)
     setEditandoPerfil(false)
     await cargarRedDeAmigos()
+  }
+
+  const subirFotoPerfil = async (file?: File) => {
+    if (!file || !session?.user?.id) return
+    setErrorAvatar('')
+    if (!file.type.startsWith('image/')) {
+      setErrorAvatar('El archivo debe ser una imagen.')
+      return
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setErrorAvatar('La imagen no puede superar los 5 MB.')
+      return
+    }
+
+    setSubiendoAvatar(true)
+    try {
+      const extension = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg'
+      const ruta = `${session.user.id}/avatar-${Date.now()}.${extension}`
+      const { error: uploadError } = await supabase.storage.from('avatars').upload(ruta, file, {
+        cacheControl: '3600',
+        upsert: true,
+        contentType: file.type,
+      })
+      if (uploadError) throw uploadError
+
+      const { data: publicData } = supabase.storage.from('avatars').getPublicUrl(ruta)
+      const fotoUrl = publicData.publicUrl
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .upsert({ id: session.user.id, avatar_url: fotoUrl }, { onConflict: 'id' })
+      if (profileError) throw profileError
+
+      setAvatarUsuario(fotoUrl)
+      await cargarRedDeAmigos()
+    } catch (error) {
+      console.error('Error subiendo foto de perfil:', error)
+      setErrorAvatar('No se ha podido subir la foto. Comprueba que el almacenamiento de avatares esté configurado.')
+    } finally {
+      setSubiendoAvatar(false)
+    }
   }
 
   const volverAmigos = () => {
@@ -2961,7 +3015,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
           <button className={`wg-nav-link ${pagina === 'amigos' || pagina === 'perfil' ? 'wg-nav-active' : ''}`} onClick={() => setPagina('amigos')}>Amigos</button>
         </nav>
 
-        <div className="profile" onClick={abrirMiPerfil} style={{ cursor: 'pointer' }} title="Mi perfil">{avatarUsuario}</div>
+        <div className="profile" onClick={abrirMiPerfil} style={{ cursor: 'pointer' }} title="Mi perfil"><AvatarVisual value={avatarUsuario} /></div>
       </header>
 
       <main>
@@ -3579,7 +3633,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                                 fontSize: '25px',
                               }}
                             >
-                              {amigo.avatar}
+                              <AvatarVisual value={amigo.avatar} />
                             </div>
                             <div style={{ minWidth: 0 }}>
                               <strong style={{ display: 'block' }}>{amigo.name}</strong>
@@ -5567,7 +5621,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                         </div>
                         <button className="wgx-friend-avatar wgx-friend-avatar-v2" onClick={() => abrirPerfil(amigo)} aria-label={`Abrir perfil de ${amigo.name}`}>
                           <span className="avatar-halo" />
-                          <span className="avatar-core">{amigo.avatar}</span>
+                          <AvatarVisual value={amigo.avatar} className="avatar-core-image" />
                         </button>
                         <div className="wgx-friend-identity-v2">
                           <span className="wgx-friend-label">WEGEEKTV · TU CÍRCULO</span>
@@ -5616,128 +5670,162 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
         )}
 
         {pagina === 'mi-perfil' && (
-          <section className="welcome">
-            <p className="small-title">MI PERFIL</p>
+          <section className="wgx-my-profile-page">
+            <div className="wgx-my-profile-aurora aurora-pink" />
+            <div className="wgx-my-profile-aurora aurora-blue" />
+            <div className="wgx-my-profile-stars">✦　·　✧　·　✦　·　·　✧　·　✦</div>
 
-            <div className="profile-header">
-              <div className="big-avatar">{avatarUsuario}</div>
-              <div style={{ flex: 1 }}>
-                {editandoPerfil ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '420px' }}>
-                    <input
-                      value={nombreUsuario}
-                      onChange={(e) => setNombreUsuario(e.target.value)}
-                      placeholder="Tu nombre"
-                      style={{ padding: '12px 14px', borderRadius: '12px', border: '1px solid rgba(255,255,255,.15)', background: 'rgba(255,255,255,.06)', color: 'white' }}
-                    />
-                    <input
-                      value={avatarUsuario}
-                      onChange={(e) => setAvatarUsuario(e.target.value)}
-                      placeholder="Avatar (emoji)"
-                      maxLength={4}
-                      style={{ padding: '12px 14px', borderRadius: '12px', border: '1px solid rgba(255,255,255,.15)', background: 'rgba(255,255,255,.06)', color: 'white' }}
-                    />
-                    <div style={{ display: 'flex', gap: '10px' }}>
-                      <button className="primary" onClick={guardarPerfilUsuario}>Guardar cambios</button>
-                      <button className="secondary" onClick={() => setEditandoPerfil(false)}>Cancelar</button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <h1>{nombreUsuario}</h1>
-                    <p>Tu colección personal en WeGeekTV</p>
-                    <button className="secondary" onClick={() => setEditandoPerfil(true)}>✏️ Editar perfil</button>
-                  </>
+            <div className="wgx-my-profile-shell">
+              <div className="wgx-my-profile-topbar">
+                <div>
+                  <span className="wgx-section-kicker">WEGEEKTV · IDENTIDAD</span>
+                  <strong>MI PERFIL</strong>
+                </div>
+                {!editandoPerfil && (
+                  <button className="wgx-action primary" onClick={() => { setErrorAvatar(''); setEditandoPerfil(true) }}>✦ EDITAR PERFIL</button>
                 )}
               </div>
-            </div>
 
-            {(() => {
-              const minutosPeliculas = vistasTMDB.reduce((t, p) => t + (p.runtime || 0), 0)
-              const minutosSeriesPorEpisodios = (Object.values(episodiosVistos) as TmdbEpisode[][]).reduce(
-                (total, episodios) =>
-                  total +
-                  (Array.isArray(episodios)
-                    ? episodios.reduce((subtotal, episodio) => subtotal + (episodio.runtime || 0), 0)
-                    : 0),
-                0,
-              )
-              const minutosSeriesAntiguas = vistasSeriesTMDB.reduce((total, serie) => {
-                const episodiosDeSerie = episodiosVistos[String(serie.id)] || []
-                return episodiosDeSerie.length === 0 ? total + (serie.tiempoTotal || 0) : total
-              }, 0)
-              const minutosSeries = minutosSeriesPorEpisodios + minutosSeriesAntiguas
-              const minutosTotales = minutosPeliculas + minutosSeries
-              const horas = Math.floor(minutosTotales / 60)
-              const minutos = minutosTotales % 60
-              const formatearTiempo = horas > 0 ? `${horas}h ${minutos}min` : `${minutos} min`
-
-              return (
-                <>
-                  <div className="stats">
-                    <div className="stat">
-<strong>{vistasTMDB.length}</strong>
-<span>Películas vistas</span>
-</div>
-                    <div className="stat">
-<strong>{vistasSeriesTMDB.length}</strong>
-<span>Series vistas</span>
-</div>
-                    <div className="stat">
-<strong>{(Object.values(episodiosVistos) as TmdbEpisode[][]).reduce((total, episodios) => total + (Array.isArray(episodios) ? episodios.length : 0), 0)}</strong>
-<span>Episodios vistos</span>
-</div>
-                    <div className="stat">
-<strong>{favoritasTMDB.length + favoritasSeriesTMDB.length}</strong>
-<span>Favoritos ❤️</span>
-</div>
-                    <div className="stat">
-<strong>{formatearTiempo}</strong>
-<span>Tiempo visto</span>
-</div>
+              <header className="wgx-my-profile-hero">
+                <div className="wgx-my-profile-grid" />
+                <div className="wgx-my-profile-code">PROFILE / {session?.user?.id ? String(session.user.id).slice(0, 8).toUpperCase() : 'WGT'} / PERSONAL</div>
+                <div className="wgx-my-profile-identity">
+                  <div className="wgx-my-profile-avatar-wrap">
+                    <div className="wgx-my-profile-avatar-ring ring-one" />
+                    <div className="wgx-my-profile-avatar-ring ring-two" />
+                    <button
+                      type="button"
+                      className="wgx-my-profile-avatar wgx-my-profile-avatar-clickable"
+                      onClick={() => avatarFileInputRef.current?.click()}
+                      title="Cambiar foto de perfil"
+                      aria-label="Cambiar foto de perfil"
+                    >
+                      <AvatarVisual value={avatarUsuario} />
+                      <span className="wgx-my-profile-avatar-camera">📷</span>
+                    </button>
+                    <input
+                      ref={avatarFileInputRef}
+                      className="wgx-my-profile-avatar-file-input"
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/gif"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0]
+                        void subirFotoPerfil(file)
+                        e.currentTarget.value = ''
+                      }}
+                      disabled={subiendoAvatar}
+                    />
+                    <span className="wgx-my-profile-online">● TU PERFIL</span>
                   </div>
 
-                  <section className="section">
-                    <div className="section-title">
-                      <h2>Tu actividad</h2>
-                    </div>
-                    <div className="cards">
-                      <div className="card" onClick={() => { setTipoColeccion('peliculas'); setFiltro('vistas'); setPagina('coleccion') }} style={{ cursor: 'pointer' }}>
-                        <div className="poster">▣</div>
-                        <h3>{vistasTMDB.length} películas</h3>
-                        <p>Marcadas como vistas</p>
-                      </div>
-                      <div className="card" onClick={() => { setTipoColeccion('series'); setFiltro('vistas'); setPagina('coleccion') }} style={{ cursor: 'pointer' }}>
-                        <div className="poster">◫</div>
-                        <h3>{vistasSeriesTMDB.length} series</h3>
-                        <p>Marcadas como vistas</p>
-                      </div>
-                      <div className="card" onClick={() => { setFiltro('favoritas'); setPagina('coleccion') }} style={{ cursor: 'pointer' }}>
-                        <div className="poster">♡</div>
-                        <h3>{favoritasTMDB.length + favoritasSeriesTMDB.length} favoritos</h3>
-                        <p>Tu lista personal</p>
-                      </div>
-                    </div>
-                  </section>
-
-                  <section className="section">
-                    <div className="section-title">
-                      <h2>Tus amigos</h2>
-                      <button className="secondary" onClick={() => setPagina('amigos')}>Ver amigos</button>
-                    </div>
-                    <div className="cards">
-                      {friends.filter((amigo) => amigosActuales.includes(amigo.id)).map((amigo) => (
-                        <div className="card" key={amigo.name} onClick={() => abrirPerfil(amigo)} style={{ cursor: 'pointer' }}>
-                          <div className="poster">{amigo.avatar}</div>
-                          <h3>{amigo.name}</h3>
-                          <p>{amigo.movies} películas · {amigo.series} series</p>
+                  <div className="wgx-my-profile-copy">
+                    <span className="wgx-section-kicker">TU UNIVERSO · TU HISTORIA</span>
+                    {editandoPerfil ? (
+                      <div className="wgx-my-profile-edit">
+                        <label>
+                          <span>NOMBRE DE USUARIO</span>
+                          <input value={nombreUsuario} onChange={(e) => setNombreUsuario(e.target.value)} placeholder="Tu nombre" />
+                        </label>
+                        <div className="wgx-avatar-upload-row">
+                          <div className="wgx-avatar-upload-preview"><AvatarVisual value={avatarUsuario} /></div>
+                          <div>
+                            <span className="wgx-upload-label">FOTO DE PERFIL</span>
+                            <p>Elige una imagen para que tus amigos te reconozcan.</p>
+                            <label className="wgx-upload-button">
+                              {subiendoAvatar ? 'SUBIENDO…' : '📷 CAMBIAR FOTO'}
+                              <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(e) => { const file = e.target.files?.[0]; void subirFotoPerfil(file); e.currentTarget.value = '' }} disabled={subiendoAvatar} />
+                            </label>
+                          </div>
                         </div>
-                      ))}
-                    </div>
-                  </section>
-                </>
-              )
-            })()}
+                        {errorAvatar && <div className="wgx-avatar-error">{errorAvatar}</div>}
+                        <div className="wgx-profile-edit-actions">
+                          <button className="wgx-action primary" onClick={guardarPerfilUsuario}>GUARDAR CAMBIOS <span>✓</span></button>
+                          <button className="wgx-action secondary" onClick={() => { setErrorAvatar(''); setEditandoPerfil(false) }}>CANCELAR</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <h1>{nombreUsuario}<small>.</small></h1>
+                        <div className="wgx-my-profile-hero-meta">
+                          <span>✦ TU COLECCIÓN</span><span>✦ TUS LOGROS</span><span>✦ TU VITRINA</span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div className="wgx-my-profile-signature">WEGEEKTV <span>✦</span> PERSONAL UNIVERSE</div>
+              </header>
+
+              {(() => {
+                const minutosPeliculas = vistasTMDB.reduce((t, p) => t + (p.runtime || 0), 0)
+                const minutosSeriesPorEpisodios = (Object.values(episodiosVistos) as TmdbEpisode[][]).reduce((total, episodios) => total + (Array.isArray(episodios) ? episodios.reduce((subtotal, episodio) => subtotal + (episodio.runtime || 0), 0) : 0), 0)
+                const minutosSeriesAntiguas = vistasSeriesTMDB.reduce((total, serie) => {
+                  const episodiosDeSerie = episodiosVistos[String(serie.id)] || []
+                  return episodiosDeSerie.length === 0 ? total + (serie.tiempoTotal || 0) : total
+                }, 0)
+                const minutosSeries = minutosSeriesPorEpisodios + minutosSeriesAntiguas
+                const minutosTotales = minutosPeliculas + minutosSeries
+                const horas = Math.floor(minutosTotales / 60)
+                const minutos = minutosTotales % 60
+                const formatearTiempo = horas > 0 ? `${horas}h ${minutos}min` : `${minutos} min`
+                const episodiosTotales = (Object.values(episodiosVistos) as TmdbEpisode[][]).reduce((total, episodios) => total + (Array.isArray(episodios) ? episodios.length : 0), 0)
+
+                return (
+                  <>
+                    <section className="wgx-my-profile-stats wgx-my-profile-stats-compact">
+                      <article><span>🎬</span><strong>{vistasTMDB.length}</strong><small>PELÍCULAS VISTAS</small></article>
+                      <article><span>📺</span><strong>{vistasSeriesTMDB.length}</strong><small>SERIES VISTAS</small></article>
+                      <article><span>▶</span><strong>{episodiosTotales}</strong><small>EPISODIOS VISTOS</small></article>
+                      <article><span>♥</span><strong>{favoritasTMDB.length + favoritasSeriesTMDB.length}</strong><small>FAVORITOS</small></article>
+                      <article><span>◷</span><strong>{formatearTiempo}</strong><small>TIEMPO VISTO</small></article>
+                    </section>
+
+                    <section className="wgx-my-profile-section wgx-my-friends-section wgx-my-friends-viewport">
+                      <div className="wgx-friends-showcase-heading">
+                        <div className="wgx-friends-showcase-copy">
+                          <span className="wgx-friends-kicker">02 · TU CÍRCULO</span>
+                          <h2>TU GENTE,<br /><em>tu universo.</em></h2>
+                          <p>Las personas que forman parte de tus historias en WeGeekTV.</p>
+                          <button className="wgx-friends-cta" onClick={() => setPagina('amigos')}>👥 VER AMIGOS <span>→</span></button>
+                        </div>
+                        <div className="wgx-friends-decor" aria-hidden="true">
+                          <span className="wgx-decor-crown">♕</span>
+                          <span className="wgx-decor-heart">♡</span>
+                          <span className="wgx-decor-star">✦</span>
+                          <span className="wgx-decor-arrow">↗</span>
+                        </div>
+                        <div className="wgx-friends-showcase-panel">
+                          <div className="wgx-friends-panel-title"><span>👥</span> MIS AMIGOS <b>{friends.filter((amigo) => amigosActuales.includes(amigo.id)).length}</b></div>
+                          {friends.filter((amigo) => amigosActuales.includes(amigo.id)).length > 0 ? (
+                            <div className="wgx-my-friends-grid">
+                              {friends.filter((amigo) => amigosActuales.includes(amigo.id)).map((amigo, index) => {
+                                const score = (amigo.movies || 0) + (amigo.series || 0) * 2 + (amigo.favorites || 0) * 2
+                                const nivel = Math.max(1, Math.min(50, Math.floor(score / 5) + 1))
+                                const progreso = Math.min(100, (score % 5) * 20 + 20)
+                                return (
+                                  <button className={`wgx-my-friend-card rank-${Math.min(index + 1, 4)}`} key={amigo.id} onClick={() => abrirPerfil(amigo)}>
+                                    {index < 3 && <span className="wgx-friend-rank">{index === 0 ? '♛' : index + 1}</span>}
+                                    <span className="wgx-my-friend-avatar"><AvatarVisual value={amigo.avatar} /></span>
+                                    <strong>{amigo.name}</strong>
+                                    <span className="wgx-friend-mini-stats"><i>🎬 {amigo.movies}</i><i>📺 {amigo.series}</i><i>♥ {amigo.favorites}</i></span>
+                                    <span className="wgx-friend-level"><b>NIVEL {nivel}</b><em>→</em></span>
+                                    <span className="wgx-friend-progress"><i style={{ width: `${progreso}%` }} /></span>
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          ) : (
+                            <div className="wgx-my-empty-friends"><span>✦</span><strong>Tu círculo está esperando.</strong><p>Añade amigos para llenar tu universo.</p><button className="wgx-action primary" onClick={() => setPagina('amigos')}>BUSCAR AMIGOS</button></div>
+                          )}
+                        </div>
+                      </div>
+                    </section>
+
+
+                  </>
+                )
+              })()}
+            </div>
           </section>
         )}
 
