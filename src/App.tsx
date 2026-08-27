@@ -133,7 +133,7 @@ type EpisodiosVistosPorSerie = Record<string, TmdbEpisode[]>
 
 // Normaliza episodios vistos para que la aplicación trabaje únicamente con
 // episodios reales de las temporadas principales (1+), evitando duplicados
-// aunque Supabase/localStorage devuelvan la misma fila más de una vez.
+// aunque Supabase devuelva la misma fila más de una vez.
 const normalizarEpisodiosVistos = (origen: EpisodiosVistosPorSerie): EpisodiosVistosPorSerie => {
   const resultado: EpisodiosVistosPorSerie = {}
 
@@ -884,26 +884,8 @@ console.log(
   const [vistasSeriesTMDB, setVistasSeriesTMDB] = useState<TmdbSeries[]>([])
 
   // Los episodios se guardan de forma permanente en Supabase.
-  // localStorage se mantiene como copia local para evitar perder datos durante
-  // la migración inicial y como respaldo visual si Supabase tarda en responder.
   const [episodiosVistos, setEpisodiosVistos] = useState<EpisodiosVistosPorSerie>({})
   const [episodiosTemporada, setEpisodiosTemporada] = useState<TmdbEpisode[]>([])
-
-  // IMPORTANTE: la copia local de episodios pertenece a una cuenta concreta.
-  // Nunca usamos una clave global, porque localStorage es compartido por todas
-  // las cuentas que utilizan el mismo navegador.
-  const claveLocalEpisodios = session?.user?.id
-    ? `wegeektv_episodios_vistos_${session.user.id}`
-    : null
-
-  const guardarEpisodiosLocalmente = (estado: EpisodiosVistosPorSerie) => {
-    if (!claveLocalEpisodios) return
-    try {
-      localStorage.setItem(claveLocalEpisodios, JSON.stringify(estado))
-    } catch (error) {
-      console.error('No se pudieron guardar los episodios localmente:', error)
-    }
-  }
   const [temporadaSeleccionada, setTemporadaSeleccionada] = useState<number | null>(null)
   const [logrosNotificacion, setLogrosNotificacion] = useState<AchievementProgress[]>([])
   const [cargandoGenerosLogros, setCargandoGenerosLogros] = useState(false)
@@ -970,7 +952,7 @@ const cargarEpisodiosVistosDesdeSupabase = async () => {
   if (!session?.user?.id) return
 
   // SUPABASE ES LA ÚNICA FUENTE DE VERDAD.
-  // No leemos localStorage para reconstruir ni insertar episodios.
+  // No usamos ninguna caché local para reconstruir ni insertar episodios.
   // Esto evita que una cuenta nueva herede datos de otra cuenta del navegador.
   const { data, error } = await supabase
     .from('user_series_episodes')
@@ -1071,115 +1053,7 @@ const cargarEpisodiosVistosDesdeSupabase = async () => {
   const estadoNormalizado = normalizarEpisodiosVistos(reconstruidos)
   setEpisodiosVistos(estadoNormalizado)
 
-  // Actualizamos la caché local únicamente con los datos recién obtenidos de
-  // Supabase. Nunca usamos esa caché para crear registros nuevos en Supabase.
-  guardarEpisodiosLocalmente(estadoNormalizado)
-  /*
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
-  */
+
 }
 
 useEffect(() => {
@@ -1472,16 +1346,10 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
   const enriquecerColeccionAmigo = async <T extends TmdbMovie | TmdbSeries>(items: T[], tipo: 'movie' | 'tv'): Promise<T[]> => {
     const apiKey = import.meta.env.VITE_TMDB_API_KEY
     if (!apiKey || items.length === 0) return items
-    const cacheKey = `wegeektv_friend_${tipo}_details_v1`
-    let cache: Record<string, any> = {}
-    try { cache = JSON.parse(localStorage.getItem(cacheKey) || '{}') } catch { cache = {} }
     const salida = [...items]
-    let changed = false
     const worker = async (index: number) => {
       const item: any = salida[index]
       if (!item || !Number.isFinite(Number(item.id)) || Number(item.id) <= 0) return
-      const key = String(item.id)
-      if (cache[key]) { salida[index] = { ...item, ...cache[key] }; return }
       try {
         const response = await fetchTMDBSafe(`https://api.themoviedb.org/3/${tipo}/${item.id}?api_key=${apiKey}&language=es-ES`)
         if (!response.ok) return
@@ -1489,13 +1357,10 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
         const extra = tipo === 'movie'
           ? { runtime: details.runtime ?? item.runtime, genres: details.genres ?? item.genres ?? [], release_date: details.release_date || item.release_date }
           : { genres: details.genres ?? item.genres ?? [], first_air_date: details.first_air_date || item.first_air_date, number_of_episodes: details.number_of_episodes, number_of_seasons: details.number_of_seasons }
-        cache[key] = extra
         salida[index] = { ...item, ...extra }
-        changed = true
       } catch (error) { console.warn('No se pudo enriquecer contenido del amigo:', item.id, error) }
     }
     for (let i = 0; i < salida.length; i += 6) await Promise.all(salida.slice(i, i + 6).map((_, offset) => worker(i + offset)))
-    if (changed) localStorage.setItem(cacheKey, JSON.stringify(cache))
     return salida
   }
 
@@ -1958,7 +1823,6 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
       )
 
       setVistasTMDB(actualizadas)
-      localStorage.setItem('wegeektv_vistas', JSON.stringify(actualizadas))
     }
 
     actualizarDuracionesPeliculas()
@@ -2128,7 +1992,6 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
       setEpisodiosVistos((actuales) => {
         const nuevas = { ...actuales }
         delete nuevas[String(serie.id)]
-        guardarEpisodiosLocalmente(nuevas)
         return nuevas
       })
 
@@ -2176,7 +2039,6 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
 
     setEpisodiosVistos((actuales) => {
       const nuevas = { ...actuales, [String(serie.id)]: todosLosEpisodios }
-      guardarEpisodiosLocalmente(nuevas)
       return nuevas
     })
 
@@ -2253,7 +2115,6 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
       if (!haCambiado) return
 
       setVistasSeriesTMDB(actualizadas)
-      localStorage.setItem('wegeektv_series_vistas', JSON.stringify(actualizadas))
     }
 
     actualizarDuracionesSeries()
@@ -2500,37 +2361,28 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
       setCargandoGenerosLogros(true)
       const apiKey = import.meta.env.VITE_TMDB_API_KEY
       try {
-        const movieCache: Record<string, { id: number; name: string }[]> = JSON.parse(localStorage.getItem('wegeektv_generos_peliculas_cache') || '{}')
-        const seriesCache: Record<string, { id: number; name: string }[]> = JSON.parse(localStorage.getItem('wegeektv_generos_series_cache') || '{}')
-
         const peliculasActualizadas = await Promise.all(vistasTMDB.map(async (pelicula) => {
           if (pelicula.genres?.length) return pelicula
-          if (movieCache[String(pelicula.id)]) return { ...pelicula, genres: movieCache[String(pelicula.id)] }
           try {
             const respuesta = await fetchTMDBSafe(`https://api.themoviedb.org/3/movie/${pelicula.id}?api_key=${apiKey}&language=es-ES`)
             if (!respuesta.ok) return pelicula
             const datos = await respuesta.json()
             const genres = Array.isArray(datos.genres) ? datos.genres : []
-            movieCache[String(pelicula.id)] = genres
             return { ...pelicula, genres }
           } catch { return pelicula }
         }))
 
         const seriesActualizadas = await Promise.all(vistasSeriesTMDB.map(async (serie) => {
           if (serie.genres?.length) return serie
-          if (seriesCache[String(serie.id)]) return { ...serie, genres: seriesCache[String(serie.id)] }
           try {
             const respuesta = await fetchTMDBSafe(`https://api.themoviedb.org/3/tv/${serie.id}?api_key=${apiKey}&language=es-ES`)
             if (!respuesta.ok) return serie
             const datos = await respuesta.json()
             const genres = Array.isArray(datos.genres) ? datos.genres : []
-            seriesCache[String(serie.id)] = genres
             return { ...serie, genres }
           } catch { return serie }
         }))
 
-        localStorage.setItem('wegeektv_generos_peliculas_cache', JSON.stringify(movieCache))
-        localStorage.setItem('wegeektv_generos_series_cache', JSON.stringify(seriesCache))
         const moviesChanged = peliculasActualizadas.some((movie, index) => movie.genres !== vistasTMDB[index]?.genres)
         const seriesChanged = seriesActualizadas.some((serie, index) => serie.genres !== vistasSeriesTMDB[index]?.genres)
         if (moviesChanged) setVistasTMDB(peliculasActualizadas)
@@ -2616,64 +2468,70 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
     })
   }, [episodiosVistos, vistasTMDB, vistasSeriesTMDB])
 
+  // Se mantiene únicamente durante la sesión actual y se reinicia al cambiar de cuenta.
+  const logrosEstadoRef = useRef<{
+    userId: string | null
+    initialized: boolean
+    unlocked: Record<string, number>
+    notified: Record<string, number>
+  }>({
+    userId: null,
+    initialized: false,
+    unlocked: {},
+    notified: {},
+  })
+
   useEffect(() => {
     if (!session?.user?.id) return
 
-    try {
-      const userId = session.user.id
-      const unlockedKey = `wegeektv_logros_desbloqueados_${userId}`
-      const notifiedKey = `wegeektv_logros_notificados_${userId}`
-      const initializedKey = `wegeektv_logros_inicializados_${userId}`
+    const userId = session.user.id
+    const estado = logrosEstadoRef.current
 
-      const previous: Record<string, number> = JSON.parse(localStorage.getItem(unlockedKey) || '{}')
-      const notified: Record<string, number> = JSON.parse(localStorage.getItem(notifiedKey) || '{}')
-      const initialized = localStorage.getItem(initializedKey) === '1'
-
-      // Esperamos a que haya datos reales antes de crear la línea base.
-      // Así no aparecen ventanas al cargar una cuenta que ya tenía logros.
-      if (!initialized) {
-        const hayDatos = logrosCalculados.some((achievement) => achievement.value > 0)
-        if (!hayDatos) return
-
-        const baseline: Record<string, number> = {}
-        for (const achievement of logrosCalculados) {
-          baseline[String(achievement.id)] = Math.max(0, achievement.tierIndex + 1)
-        }
-        localStorage.setItem(unlockedKey, JSON.stringify(baseline))
-        localStorage.setItem(notifiedKey, JSON.stringify(baseline))
-        localStorage.setItem(initializedKey, '1')
-        return
-      }
-
-      const next = { ...previous }
-      const nextNotified = { ...notified }
-      const nuevos: AchievementProgress[] = []
-
-      for (const achievement of logrosCalculados) {
-        const currentLevel = Math.max(0, achievement.tierIndex + 1)
-        const oldLevel = previous[String(achievement.id)] ?? 0
-        const oldNotifiedLevel = notified[String(achievement.id)] ?? 0
-
-        if (currentLevel > oldLevel) {
-          next[String(achievement.id)] = currentLevel
-        }
-
-        if (currentLevel > oldNotifiedLevel) {
-          nuevos.push({ ...achievement, tierIndex: currentLevel - 1 })
-          nextNotified[String(achievement.id)] = currentLevel
-        }
-      }
-
-      localStorage.setItem(unlockedKey, JSON.stringify(next))
-      localStorage.setItem(notifiedKey, JSON.stringify(nextNotified))
-
-      if (nuevos.length) {
-        setLogrosNotificacion((actuales) => [...actuales, ...nuevos])
-      }
-    } catch (error) {
-      console.error('No se pudieron actualizar los logros:', error)
+    if (estado.userId !== userId) {
+      estado.userId = userId
+      estado.initialized = false
+      estado.unlocked = {}
+      estado.notified = {}
     }
-  }, [logrosCalculados, session])
+
+    // Esperamos a que haya datos reales antes de crear la línea base.
+    // Así no aparecen ventanas al cargar una cuenta que ya tenía logros.
+    if (!estado.initialized) {
+      const hayDatos = logrosCalculados.some((achievement) => achievement.value > 0)
+      if (!hayDatos) return
+
+      const baseline: Record<string, number> = {}
+      for (const achievement of logrosCalculados) {
+        baseline[String(achievement.id)] = Math.max(0, achievement.tierIndex + 1)
+      }
+
+      estado.unlocked = baseline
+      estado.notified = { ...baseline }
+      estado.initialized = true
+      return
+    }
+
+    const nuevos: AchievementProgress[] = []
+
+    for (const achievement of logrosCalculados) {
+      const currentLevel = Math.max(0, achievement.tierIndex + 1)
+      const oldLevel = estado.unlocked[String(achievement.id)] ?? 0
+      const oldNotifiedLevel = estado.notified[String(achievement.id)] ?? 0
+
+      if (currentLevel > oldLevel) {
+        estado.unlocked[String(achievement.id)] = currentLevel
+      }
+
+      if (currentLevel > oldNotifiedLevel) {
+        nuevos.push({ ...achievement, tierIndex: currentLevel - 1 })
+        estado.notified[String(achievement.id)] = currentLevel
+      }
+    }
+
+    if (nuevos.length) {
+      setLogrosNotificacion((actuales) => [...actuales, ...nuevos])
+    }
+  }, [logrosCalculados, session?.user?.id])
 
   // El temporizador vive separado del cálculo de logros.
   // Así una actualización de estadísticas o de géneros nunca reinicia el contador.
@@ -4534,8 +4392,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 else delete nuevas[clave]
 
                 setEpisodiosVistos(nuevas)
-                guardarEpisodiosLocalmente(nuevas)
-                await sincronizarSerieVistaConEpisodios(
+                        await sincronizarSerieVistaConEpisodios(
                   serieSeleccionada,
                   nuevosVistos,
                 )
@@ -4578,8 +4435,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 else delete nuevas[clave]
 
                 setEpisodiosVistos(nuevas)
-                guardarEpisodiosLocalmente(nuevas)
-                await sincronizarSerieVistaConEpisodios(serieSeleccionada, nuevosVistos)
+                        await sincronizarSerieVistaConEpisodios(serieSeleccionada, nuevosVistos)
               }}
             />
 

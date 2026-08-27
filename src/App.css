@@ -10000,3 +10000,179 @@ html, body {
   .wgx-my-friend-card>strong{font-size:12px!important}
   .wgx-friend-mini-stats i{font-size:8px!important;min-height:22px!important}
 }
+
+
+/* ================================================================
+   WEGEEKTV · EDITOR DE FOTO DE PERFIL HD
+   Recorte cuadrado, zoom y posicionamiento antes de subir.
+   ================================================================ */
+.wgx-my-profile-avatar-clickable > img,
+.wgx-my-profile-avatar > img,
+.wgx-my-friend-avatar > img,
+.wgx-friend-avatar-v2 .avatar-core-image,
+.profile > img{
+  width:100%!important;
+  height:100%!important;
+  display:block!important;
+  object-fit:cover!important;
+  object-position:center center!important;
+  image-rendering:auto!important;
+  -webkit-backface-visibility:hidden;
+  backface-visibility:hidden;
+}
+
+.wgx-avatar-editor-backdrop{
+  position:fixed!important;
+  inset:0!important;
+  z-index:99999!important;
+  display:grid!important;
+  place-items:center!important;
+  padding:22px!important;
+  background:rgba(4,5,15,.82)!important;
+  backdrop-filter:blur(18px)!important;
+  -webkit-backdrop-filter:blur(18px)!important;
+  animation:wgxAvatarEditorIn .22s ease both!important;
+}
+.wgx-avatar-editor{
+  width:min(900px,96vw)!important;
+  max-height:min(92vh,820px)!important;
+  overflow:auto!important;
+  box-sizing:border-box!important;
+  border:1px solid rgba(255,255,255,.16)!important;
+  border-radius:30px!important;
+  background:linear-gradient(145deg,rgba(29,24,58,.98),rgba(9,14,35,.98))!important;
+  box-shadow:0 35px 100px rgba(0,0,0,.6),0 0 80px rgba(255,47,174,.14),0 0 80px rgba(32,228,239,.10)!important;
+}
+.wgx-avatar-editor-head{
+  display:flex!important;
+  align-items:flex-start!important;
+  justify-content:space-between!important;
+  gap:20px!important;
+  padding:25px 28px 18px!important;
+  border-bottom:1px solid rgba(255,255,255,.08)!important;
+}
+.wgx-avatar-editor-head>div>span{
+  display:block!important;
+  margin-bottom:7px!important;
+  color:#20e4ef!important;
+  font-size:9px!important;
+  font-weight:900!important;
+  letter-spacing:.2em!important;
+}
+.wgx-avatar-editor-head h2{
+  margin:0!important;
+  color:#fff!important;
+  font-size:clamp(25px,4vw,38px)!important;
+  line-height:1!important;
+  letter-spacing:-.045em!important;
+}
+.wgx-avatar-editor-head h2 em{
+  font-style:normal!important;
+  background:linear-gradient(90deg,#ff58b5,#ffbd55,#6eeaff)!important;
+  -webkit-background-clip:text!important;
+  background-clip:text!important;
+  color:transparent!important;
+}
+.wgx-avatar-editor-close{
+  width:42px!important;
+  height:42px!important;
+  flex:0 0 42px!important;
+  border:1px solid rgba(255,255,255,.12)!important;
+  border-radius:50%!important;
+  background:rgba(255,255,255,.06)!important;
+  color:#fff!important;
+  font-size:27px!important;
+  line-height:1!important;
+  cursor:pointer!important;
+  transition:.2s ease!important;
+}
+.wgx-avatar-editor-close:hover{transform:rotate(8deg) scale(1.06)!important;background:rgba(255,70,180,.18)!important;border-color:rgba(255,100,190,.4)!important}
+.wgx-avatar-editor-body{
+  display:grid!important;
+  grid-template-columns:minmax(280px,390px) minmax(260px,1fr)!important;
+  gap:28px!important;
+  align-items:center!important;
+  padding:26px 28px 20px!important;
+}
+.wgx-avatar-editor-preview-shell{text-align:center!important}
+.wgx-avatar-editor-preview{
+  position:relative!important;
+  width:min(390px,78vw)!important;
+  aspect-ratio:1!important;
+  margin:auto!important;
+  overflow:hidden!important;
+  border-radius:50%!important;
+  isolation:isolate!important;
+  background:linear-gradient(145deg,#2c1854,#10182f)!important;
+  border:4px solid rgba(255,255,255,.85)!important;
+  box-shadow:0 0 0 8px rgba(255,255,255,.045),0 0 45px rgba(255,47,174,.3),0 0 80px rgba(32,228,239,.16)!important;
+}
+.wgx-avatar-editor-preview>img{
+  position:absolute!important;
+  left:0!important;
+  top:0!important;
+  width:100%!important;
+  height:100%!important;
+  object-fit:cover!important;
+  object-position:center center!important;
+  transform-origin:center center!important;
+  transition:transform .08s linear!important;
+  user-select:none!important;
+  -webkit-user-drag:none!important;
+}
+.wgx-avatar-editor-grid{
+  position:absolute!important;
+  inset:0!important;
+  pointer-events:none!important;
+  background:linear-gradient(90deg,transparent 49.7%,rgba(255,255,255,.15) 50%,transparent 50.3%),linear-gradient(transparent 49.7%,rgba(255,255,255,.15) 50%,transparent 50.3%)!important;
+  opacity:.4!important;
+}
+.wgx-avatar-editor-corner{position:absolute!important;width:24px!important;height:24px!important;border-color:#fff!important;border-style:solid!important;filter:drop-shadow(0 0 8px rgba(32,228,239,.8))!important}
+.corner-tl{left:15px!important;top:15px!important;border-width:3px 0 0 3px!important;border-radius:8px 0 0 0!important}
+.corner-tr{right:15px!important;top:15px!important;border-width:3px 3px 0 0!important;border-radius:0 8px 0 0!important}
+.corner-bl{left:15px!important;bottom:15px!important;border-width:0 0 3px 3px!important;border-radius:0 0 0 8px!important}
+.corner-br{right:15px!important;bottom:15px!important;border-width:0 3px 3px 0!important;border-radius:0 0 8px 0!important}
+.wgx-avatar-editor-preview-shell>small{display:block!important;margin-top:13px!important;color:rgba(255,255,255,.4)!important;font-size:8px!important;font-weight:850!important;letter-spacing:.18em!important}
+.wgx-avatar-editor-controls{display:flex!important;flex-direction:column!important;gap:20px!important}
+.wgx-avatar-editor-control>div{display:flex!important;justify-content:space-between!important;align-items:center!important;margin-bottom:8px!important}
+.wgx-avatar-editor-control b{color:#fff!important;font-size:9px!important;letter-spacing:.15em!important}
+.wgx-avatar-editor-control span{color:#ff79c8!important;font-size:10px!important;font-weight:800!important}
+.wgx-avatar-editor-control input[type=range]{width:100%!important;accent-color:#ff4fa3!important;cursor:pointer!important}
+.wgx-avatar-editor-reset{
+  align-self:flex-start!important;
+  border:1px solid rgba(255,255,255,.12)!important;
+  background:rgba(255,255,255,.05)!important;
+  color:rgba(255,255,255,.8)!important;
+  padding:10px 13px!important;
+  border-radius:12px!important;
+  font-size:9px!important;
+  font-weight:850!important;
+  letter-spacing:.12em!important;
+  cursor:pointer!important;
+}
+.wgx-avatar-editor-reset:hover{background:rgba(255,255,255,.1)!important;color:#fff!important}
+.wgx-avatar-editor-tip{
+  margin:0!important;
+  padding:13px 14px!important;
+  border-radius:15px!important;
+  border:1px solid rgba(32,228,239,.12)!important;
+  background:linear-gradient(135deg,rgba(255,79,163,.07),rgba(32,228,239,.07))!important;
+  color:rgba(255,255,255,.5)!important;
+  font-size:11px!important;
+  line-height:1.55!important;
+}
+.wgx-avatar-editor-actions{
+  display:flex!important;
+  justify-content:flex-end!important;
+  gap:10px!important;
+  padding:18px 28px 25px!important;
+  border-top:1px solid rgba(255,255,255,.08)!important;
+}
+@keyframes wgxAvatarEditorIn{from{opacity:0;transform:scale(.985)}to{opacity:1;transform:scale(1)}}
+@media(max-width:700px){
+  .wgx-avatar-editor-body{grid-template-columns:1fr!important;padding:20px!important;gap:22px!important}
+  .wgx-avatar-editor-preview{width:min(330px,78vw)!important}
+  .wgx-avatar-editor-head{padding:20px!important}
+  .wgx-avatar-editor-actions{padding:15px 20px 20px!important;flex-direction:column-reverse!important}
+  .wgx-avatar-editor-actions .wgx-action{width:100%!important}
+}
