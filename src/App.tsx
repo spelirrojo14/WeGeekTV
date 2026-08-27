@@ -626,6 +626,12 @@ function App() {
   const [subiendoAvatar, setSubiendoAvatar] = useState(false)
   const avatarFileInputRef = useRef<HTMLInputElement | null>(null)
   const [errorAvatar, setErrorAvatar] = useState('')
+  const [fotoEditorOpen, setFotoEditorOpen] = useState(false)
+  const [fotoEditorSrc, setFotoEditorSrc] = useState('')
+  const [fotoEditorZoom, setFotoEditorZoom] = useState(1)
+  const [fotoEditorX, setFotoEditorX] = useState(0)
+  const [fotoEditorY, setFotoEditorY] = useState(0)
+  const [procesandoFoto, setProcesandoFoto] = useState(false)
   const [busquedaAmigos, setBusquedaAmigos] = useState('')
   const [usuariosBusqueda, setUsuariosBusqueda] = useState<Friend[]>([])
   const [buscandoUsuarios, setBuscandoUsuarios] = useState(false)
@@ -963,6 +969,9 @@ const guardarEpisodiosEnSupabase = async (serieId: number, episodios: TmdbEpisod
 const cargarEpisodiosVistosDesdeSupabase = async () => {
   if (!session?.user?.id) return
 
+  // SUPABASE ES LA ÚNICA FUENTE DE VERDAD.
+  // No leemos localStorage para reconstruir ni insertar episodios.
+  // Esto evita que una cuenta nueva herede datos de otra cuenta del navegador.
   const { data, error } = await supabase
     .from('user_series_episodes')
     .select('serie_id, season_number, episode_number, watched_at')
@@ -974,206 +983,203 @@ const cargarEpisodiosVistosDesdeSupabase = async () => {
   }
 
   const filas = data ?? []
-
-  // La copia local también está aislada por usuario.
-  // No leemos nunca la antigua clave global `wegeektv_episodios_vistos`,
-  // porque podría contener los episodios de otra cuenta del mismo navegador.
-  // Los datos permanentes de la cuenta se cargan desde Supabase y la copia
-  // local solo puede complementar los datos de ESA misma cuenta.
-  let localesDelUsuario: EpisodiosVistosPorSerie = {}
-  try {
-    if (claveLocalEpisodios) {
-      const guardados = localStorage.getItem(claveLocalEpisodios)
-      if (guardados) {
-        const parsed = JSON.parse(guardados) as EpisodiosVistosPorSerie
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          localesDelUsuario = parsed
-        }
-      }
-    }
-  } catch (error) {
-    console.error('No se pudieron leer los episodios locales de esta cuenta:', error)
-  }
-
-  // Solo sincronizamos una copia local que ya está vinculada a session.user.id.
-  try {
-    const existentes = new Set(
-      filas.map(
-        (fila) => `${fila.serie_id}:${Number(fila.season_number)}:${Number(fila.episode_number)}`,
-      ),
-    )
-
-    const pendientes: Array<{
-      user_id: string
-      serie_id: number
-      season_number: number
-      episode_number: number
-      watched_at: string
-    }> = []
-
-    for (const [serieIdTexto, episodios] of Object.entries(localesDelUsuario)) {
-      const serieId = Number(serieIdTexto)
-      if (!Number.isFinite(serieId) || !Array.isArray(episodios)) continue
-
-      for (const episodio of episodios) {
-        const seasonNumber = Number(episodio?.season_number)
-        const episodeNumber = Number(episodio?.episode_number)
-        if (!Number.isFinite(seasonNumber) || !Number.isFinite(episodeNumber)) continue
-
-        const clave = `${serieId}:${seasonNumber}:${episodeNumber}`
-        if (existentes.has(clave)) continue
-
-        existentes.add(clave)
-        pendientes.push({
-          user_id: session.user.id,
-          serie_id: serieId,
-          season_number: seasonNumber,
-          episode_number: episodeNumber,
-          watched_at: new Date().toISOString(),
-        })
-      }
-    }
-
-    const TAMANO_LOTE = 50
-    for (let i = 0; i < pendientes.length; i += TAMANO_LOTE) {
-      const lote = pendientes.slice(i, i + TAMANO_LOTE)
-      const { data: insertados, error: errorLote } = await supabase
-        .from('user_series_episodes')
-        .insert(lote)
-        .select('serie_id, season_number, episode_number, watched_at')
-
-      if (errorLote) {
-        console.error(
-          `Error sincronizando copia local de episodios (${i + 1}-${Math.min(i + TAMANO_LOTE, pendientes.length)}):`,
-          errorLote,
-        )
-        break
-      }
-
-      filas.push(...(insertados ?? lote))
-    }
-  } catch (error) {
-    console.error('Error sincronizando la copia local de episodios:', error)
-  }
-
   const porSerie: Record<string, { season_number: number; episode_number: number }[]> = {}
   const clavesEpisodiosPorSerie: Record<string, Set<string>> = {}
+
   for (const fila of filas) {
     const clave = String(fila.serie_id)
     const season = Number(fila.season_number)
     const episode = Number(fila.episode_number)
-    // Los especiales (temporada 0) no forman parte de la colección principal
-    // de la web y no deben inflar los capítulos vistos.
+
+    // Los especiales (temporada 0) no forman parte de la colección principal.
     if (!Number.isFinite(season) || season < 1 || !Number.isFinite(episode) || episode < 1) continue
+
     if (!porSerie[clave]) {
       porSerie[clave] = []
       clavesEpisodiosPorSerie[clave] = new Set<string>()
     }
+
     const claveEpisodio = `${season}:${episode}`
     if (clavesEpisodiosPorSerie[clave].has(claveEpisodio)) continue
+
     clavesEpisodiosPorSerie[clave].add(claveEpisodio)
     porSerie[clave].push({ season_number: season, episode_number: episode })
   }
 
   const reconstruidos: EpisodiosVistosPorSerie = {}
   const apiKey = import.meta.env.VITE_TMDB_API_KEY
-  if (!apiKey) return
 
-  await Promise.all(
-    Object.entries(porSerie).map(async ([serieIdTexto, episodiosGuardados]) => {
-      const serieId = Number(serieIdTexto)
-      const temporadas = [...new Set(episodiosGuardados.map((episodio) => episodio.season_number))]
-      const episodiosTMDB: TmdbEpisode[] = []
+  // Si no hay API key, conservamos igualmente la información mínima de Supabase.
+  if (!apiKey) {
+    for (const [serieIdTexto, episodios] of Object.entries(porSerie)) {
+      reconstruidos[serieIdTexto] = episodios.map((episodio) => ({
+        id: -(Number(serieIdTexto) * 100000 + episodio.season_number * 1000 + episodio.episode_number),
+        name: `Episodio ${episodio.episode_number}`,
+        season_number: episodio.season_number,
+        episode_number: episodio.episode_number,
+        overview: '',
+        still_path: null,
+      }))
+    }
+  } else {
+    await Promise.all(
+      Object.entries(porSerie).map(async ([serieIdTexto, episodiosGuardados]) => {
+        const serieId = Number(serieIdTexto)
+        const temporadas = [...new Set(episodiosGuardados.map((episodio) => episodio.season_number))]
+        const episodiosTMDB: TmdbEpisode[] = []
 
-      await Promise.all(
-        temporadas.map(async (temporada) => {
-          try {
-            const respuesta = await fetch(
-              `https://api.themoviedb.org/3/tv/${serieId}/season/${temporada}?api_key=${apiKey}&language=es-ES`,
-            )
-            if (!respuesta.ok) return
-            const datos = await respuesta.json()
-            if (Array.isArray(datos.episodes)) episodiosTMDB.push(...(datos.episodes as TmdbEpisode[]))
-          } catch (error) {
-            console.error(`No se pudieron reconstruir los episodios de la serie ${serieId}:`, error)
-          }
-        }),
-      )
-
-      // MUY IMPORTANTE: Supabase es la fuente de verdad de los episodios vistos.
-      // TMDB solo aporta los datos visuales del episodio. Si TMDB no devuelve
-      // alguno de los episodios guardados (por cambios de catálogo, idioma,
-      // errores temporales, especiales, etc.), NO lo descartamos. Creamos un
-      // registro mínimo con temporada/episodio para conservar el visto.
-      const guardadosUnicos = episodiosGuardados.filter((episodio, indice, lista) =>
-        lista.findIndex((otro) =>
-          otro.season_number === episodio.season_number &&
-          otro.episode_number === episodio.episode_number
-        ) === indice
-      )
-
-      const vistos: TmdbEpisode[] = guardadosUnicos.map((guardado) => {
-        const encontrado = episodiosTMDB.find(
-          (episodio) =>
-            episodio.season_number === guardado.season_number &&
-            episodio.episode_number === guardado.episode_number,
+        await Promise.all(
+          temporadas.map(async (temporada) => {
+            try {
+              const respuesta = await fetch(
+                `https://api.themoviedb.org/3/tv/${serieId}/season/${temporada}?api_key=${apiKey}&language=es-ES`,
+              )
+              if (!respuesta.ok) return
+              const datos = await respuesta.json()
+              if (Array.isArray(datos.episodes)) episodiosTMDB.push(...(datos.episodes as TmdbEpisode[]))
+            } catch (error) {
+              console.error(`No se pudieron reconstruir los episodios de la serie ${serieId}:`, error)
+            }
+          }),
         )
 
-        if (encontrado) return encontrado
+        const vistos: TmdbEpisode[] = episodiosGuardados.map((guardado) => {
+          const encontrado = episodiosTMDB.find(
+            (episodio) =>
+              episodio.season_number === guardado.season_number &&
+              episodio.episode_number === guardado.episode_number,
+          )
 
-        // ID sintético estable. Solo se usa para mantener el episodio en el
-        // estado local cuando TMDB no lo devuelve; nunca se escribe en Supabase.
-        const idSintetico = -(serieId * 100000 + guardado.season_number * 1000 + guardado.episode_number)
-        return {
-          id: idSintetico,
-          name: `Episodio ${guardado.episode_number}`,
-          season_number: guardado.season_number,
-          episode_number: guardado.episode_number,
-          overview: '',
-          still_path: null,
-        }
-      })
+          if (encontrado) return encontrado
 
-      if (vistos.length > 0) reconstruidos[serieIdTexto] = vistos
-    }),
-  )
+          const idSintetico = -(serieId * 100000 + guardado.season_number * 1000 + guardado.episode_number)
+          return {
+            id: idSintetico,
+            name: `Episodio ${guardado.episode_number}`,
+            season_number: guardado.season_number,
+            episode_number: guardado.episode_number,
+            overview: '',
+            still_path: null,
+          }
+        })
 
-  // No mezclamos datos de una clave local global. Si la API de TMDB no
-  // consigue reconstruir algún episodio, solo conservamos datos de la copia
-  // local que pertenece al usuario autenticado actual.
-  let estadoFinal = reconstruidos
-  try {
-    const fusionados: EpisodiosVistosPorSerie = { ...reconstruidos }
-
-    for (const [serieIdTexto, episodiosLocales] of Object.entries(localesDelUsuario)) {
-      if (!Array.isArray(episodiosLocales)) continue
-      const existentes = fusionados[serieIdTexto] ?? []
-      const claves = new Set(
-        existentes.map((episodio) => `${episodio.season_number}:${episodio.episode_number}`),
-      )
-
-      for (const episodio of episodiosLocales) {
-        const temporada = Number(episodio?.season_number)
-        const numero = Number(episodio?.episode_number)
-        if (!Number.isFinite(temporada) || temporada < 1 || !Number.isFinite(numero) || numero < 1) continue
-        const clave = `${temporada}:${numero}`
-        if (!claves.has(clave)) {
-          existentes.push({ ...episodio, season_number: temporada, episode_number: numero })
-          claves.add(clave)
-        }
-      }
-
-      if (existentes.length > 0) fusionados[serieIdTexto] = existentes
-    }
-
-    estadoFinal = fusionados
-  } catch (error) {
-    console.error('No se pudieron conservar los episodios locales de esta cuenta:', error)
+        if (vistos.length > 0) reconstruidos[serieIdTexto] = vistos
+      }),
+    )
   }
 
-  const estadoNormalizado = normalizarEpisodiosVistos(estadoFinal)
+  const estadoNormalizado = normalizarEpisodiosVistos(reconstruidos)
   setEpisodiosVistos(estadoNormalizado)
+
+  // Actualizamos la caché local únicamente con los datos recién obtenidos de
+  // Supabase. Nunca usamos esa caché para crear registros nuevos en Supabase.
   guardarEpisodiosLocalmente(estadoNormalizado)
+  /*
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+   Fuente de verdad de episodios: Supabase por usuario autenticado. No restaurar datos desde localStorage.
+  */
 }
 
 useEffect(() => {
@@ -1683,43 +1689,111 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
     await cargarRedDeAmigos()
   }
 
-  const subirFotoPerfil = async (file?: File) => {
+  const abrirEditorFoto = async (file?: File) => {
     if (!file || !session?.user?.id) return
     setErrorAvatar('')
     if (!file.type.startsWith('image/')) {
       setErrorAvatar('El archivo debe ser una imagen.')
       return
     }
-    if (file.size > 5 * 1024 * 1024) {
-      setErrorAvatar('La imagen no puede superar los 5 MB.')
+    if (file.size > 12 * 1024 * 1024) {
+      setErrorAvatar('La imagen no puede superar los 12 MB.')
       return
     }
 
-    setSubiendoAvatar(true)
     try {
-      const extension = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg'
-      const ruta = `${session.user.id}/avatar-${Date.now()}.${extension}`
-      const { error: uploadError } = await supabase.storage.from('avatars').upload(ruta, file, {
-        cacheControl: '3600',
+      const src = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result || ''))
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(file)
+      })
+      setFotoEditorSrc(src)
+      setFotoEditorZoom(1)
+      setFotoEditorX(0)
+      setFotoEditorY(0)
+      setFotoEditorOpen(true)
+    } catch (error) {
+      console.error('No se pudo abrir el editor de foto:', error)
+      setErrorAvatar('No se ha podido cargar la imagen.')
+    }
+  }
+
+  const cerrarEditorFoto = () => {
+    if (procesandoFoto) return
+    setFotoEditorOpen(false)
+    setFotoEditorSrc('')
+    setFotoEditorZoom(1)
+    setFotoEditorX(0)
+    setFotoEditorY(0)
+  }
+
+  const aplicarEdicionFoto = async () => {
+    if (!fotoEditorSrc || !session?.user?.id || procesandoFoto) return
+    setProcesandoFoto(true)
+    setErrorAvatar('')
+
+    try {
+      const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const img = new Image()
+        img.onload = () => resolve(img)
+        img.onerror = () => reject(new Error('No se pudo procesar la imagen'))
+        img.src = fotoEditorSrc
+      })
+
+      // Generamos un avatar cuadrado grande y nítido. El recorte coincide con el editor.
+      const outputSize = 1200
+      const canvas = document.createElement('canvas')
+      canvas.width = outputSize
+      canvas.height = outputSize
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('Canvas no disponible')
+
+      const baseScale = Math.max(outputSize / image.naturalWidth, outputSize / image.naturalHeight)
+      const scale = baseScale * fotoEditorZoom
+      const drawWidth = image.naturalWidth * scale
+      const drawHeight = image.naturalHeight * scale
+      const offsetX = (outputSize - drawWidth) / 2 + fotoEditorX * (outputSize / 320)
+      const offsetY = (outputSize - drawHeight) / 2 + fotoEditorY * (outputSize / 320)
+
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = 'high'
+      ctx.clearRect(0, 0, outputSize, outputSize)
+      ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight)
+
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((result) => result ? resolve(result) : reject(new Error('No se pudo generar la imagen')), 'image/webp', 0.94)
+      })
+
+      setSubiendoAvatar(true)
+      const ruta = `${session.user.id}/avatar-${Date.now()}.webp`
+      const { error: uploadError } = await supabase.storage.from('avatars').upload(ruta, blob, {
+        cacheControl: '31536000',
         upsert: true,
-        contentType: file.type,
+        contentType: 'image/webp',
       })
       if (uploadError) throw uploadError
 
       const { data: publicData } = supabase.storage.from('avatars').getPublicUrl(ruta)
-      const fotoUrl = publicData.publicUrl
+      const fotoUrl = `${publicData.publicUrl}?v=${Date.now()}`
       const { error: profileError } = await supabase
         .from('profiles')
         .upsert({ id: session.user.id, avatar_url: fotoUrl }, { onConflict: 'id' })
       if (profileError) throw profileError
 
       setAvatarUsuario(fotoUrl)
+      setFotoEditorOpen(false)
+      setFotoEditorSrc('')
+      setFotoEditorZoom(1)
+      setFotoEditorX(0)
+      setFotoEditorY(0)
       await cargarRedDeAmigos()
     } catch (error) {
-      console.error('Error subiendo foto de perfil:', error)
-      setErrorAvatar('No se ha podido subir la foto. Comprueba que el almacenamiento de avatares esté configurado.')
+      console.error('Error procesando/subiendo foto de perfil:', error)
+      setErrorAvatar('No se ha podido guardar la foto. Comprueba el almacenamiento de avatares.')
     } finally {
       setSubiendoAvatar(false)
+      setProcesandoFoto(false)
     }
   }
 
@@ -5717,7 +5791,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                       accept="image/png,image/jpeg,image/webp,image/gif"
                       onChange={(e) => {
                         const file = e.target.files?.[0]
-                        void subirFotoPerfil(file)
+                        void abrirEditorFoto(file)
                         e.currentTarget.value = ''
                       }}
                       disabled={subiendoAvatar}
@@ -5740,7 +5814,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                             <p>Elige una imagen para que tus amigos te reconozcan.</p>
                             <label className="wgx-upload-button">
                               {subiendoAvatar ? 'SUBIENDO…' : '📷 CAMBIAR FOTO'}
-                              <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(e) => { const file = e.target.files?.[0]; void subirFotoPerfil(file); e.currentTarget.value = '' }} disabled={subiendoAvatar} />
+                              <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(e) => { const file = e.target.files?.[0]; void abrirEditorFoto(file); e.currentTarget.value = '' }} disabled={subiendoAvatar} />
                             </label>
                           </div>
                         </div>
@@ -5762,6 +5836,60 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 </div>
                 <div className="wgx-my-profile-signature">WEGEEKTV <span>✦</span> PERSONAL UNIVERSE</div>
               </header>
+
+              {fotoEditorOpen && (
+                <div className="wgx-avatar-editor-backdrop" role="dialog" aria-modal="true" aria-label="Editar foto de perfil">
+                  <div className="wgx-avatar-editor">
+                    <div className="wgx-avatar-editor-head">
+                      <div>
+                        <span>WEGEEKTV · PERSONALIZA TU FOTO</span>
+                        <h2>Encaja tu foto. <em>Hazla tuya.</em></h2>
+                      </div>
+                      <button type="button" className="wgx-avatar-editor-close" onClick={cerrarEditorFoto} disabled={procesandoFoto} aria-label="Cerrar editor">×</button>
+                    </div>
+
+                    <div className="wgx-avatar-editor-body">
+                      <div className="wgx-avatar-editor-preview-shell">
+                        <div className="wgx-avatar-editor-preview">
+                          <img
+                            src={fotoEditorSrc}
+                            alt="Vista previa de tu foto de perfil"
+                            style={{ transform: `translate(${fotoEditorX}px, ${fotoEditorY}px) scale(${fotoEditorZoom})` }}
+                          />
+                          <div className="wgx-avatar-editor-grid" />
+                          <div className="wgx-avatar-editor-corner corner-tl" />
+                          <div className="wgx-avatar-editor-corner corner-tr" />
+                          <div className="wgx-avatar-editor-corner corner-bl" />
+                          <div className="wgx-avatar-editor-corner corner-br" />
+                        </div>
+                        <small>PREVISUALIZACIÓN · FORMATO CUADRADO</small>
+                      </div>
+
+                      <div className="wgx-avatar-editor-controls">
+                        <div className="wgx-avatar-editor-control">
+                          <div><b>ZOOM</b><span>{Math.round(fotoEditorZoom * 100)}%</span></div>
+                          <input aria-label="Zoom de la foto" type="range" min="1" max="3" step="0.01" value={fotoEditorZoom} onChange={(e) => setFotoEditorZoom(Number(e.target.value))} />
+                        </div>
+                        <div className="wgx-avatar-editor-control">
+                          <div><b>POSICIÓN HORIZONTAL</b><span>{fotoEditorX > 0 ? '+' : ''}{fotoEditorX}px</span></div>
+                          <input aria-label="Posición horizontal" type="range" min="-90" max="90" step="1" value={fotoEditorX} onChange={(e) => setFotoEditorX(Number(e.target.value))} />
+                        </div>
+                        <div className="wgx-avatar-editor-control">
+                          <div><b>POSICIÓN VERTICAL</b><span>{fotoEditorY > 0 ? '+' : ''}{fotoEditorY}px</span></div>
+                          <input aria-label="Posición vertical" type="range" min="-90" max="90" step="1" value={fotoEditorY} onChange={(e) => setFotoEditorY(Number(e.target.value))} />
+                        </div>
+                        <button type="button" className="wgx-avatar-editor-reset" onClick={() => { setFotoEditorZoom(1); setFotoEditorX(0); setFotoEditorY(0) }} disabled={procesandoFoto}>↺ RECENTRAR FOTO</button>
+                        <p className="wgx-avatar-editor-tip">Consejo: acerca la imagen y muévela hasta que tu cara quede exactamente en el centro. Guardamos una copia cuadrada en alta calidad para que se vea bien en tu perfil y para tus amigos.</p>
+                      </div>
+                    </div>
+
+                    <div className="wgx-avatar-editor-actions">
+                      <button type="button" className="wgx-action secondary" onClick={cerrarEditorFoto} disabled={procesandoFoto}>CANCELAR</button>
+                      <button type="button" className="wgx-action primary" onClick={() => void aplicarEdicionFoto()} disabled={procesandoFoto}>{procesandoFoto ? 'GUARDANDO…' : '✓ USAR ESTA FOTO'}</button>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {(() => {
                 const minutosPeliculas = vistasTMDB.reduce((t, p) => t + (p.runtime || 0), 0)
