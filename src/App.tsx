@@ -117,6 +117,8 @@ type TmdbSeries = {
   overview?: string
   tiempoTotal?: number
   genres?: { id: number; name: string }[]
+  number_of_episodes?: number
+  number_of_seasons?: number
 }
 type TmdbEpisode = {
   id: number
@@ -583,9 +585,21 @@ const esAvatarImagen = (avatar?: string | null) => !!avatar && /^(https?:\/\/|da
 function AvatarVisual({ value, className = '' }: { value?: string | null; className?: string }) {
   const avatar = value || '👤'
   return esAvatarImagen(avatar) ? (
-    <img className={className} src={avatar} alt="Foto de perfil" loading="lazy" onError={(e) => { e.currentTarget.style.display = 'none' }} />
+    <img
+      className={className}
+      src={avatar}
+      alt="Foto de perfil"
+      loading="lazy"
+      style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'center', display: 'block' }}
+      onError={(e) => { e.currentTarget.style.display = 'none' }}
+    />
   ) : (
-    <span className={className}>{avatar}</span>
+    <span
+      className={className}
+      style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center' }}
+    >
+      {avatar}
+    </span>
   )
 }
 
@@ -640,7 +654,7 @@ function App() {
   const [amigosActuales, setAmigosActuales] = useState<string[]>([])
   const [solicitudesEnviadas, setSolicitudesEnviadas] = useState<string[]>([])
   const [busqueda, setBusqueda] = useState('')
-  const [filtro, setFiltro] = useState<'vistas' | 'favoritas'>('favoritas')
+  const [filtro, setFiltro] = useState<'vistas' | 'pendientes' | 'en-proceso'>('pendientes')
   const [tipoColeccion, setTipoColeccion] = useState<'peliculas' | 'series'>('peliculas')
   const [resultadosTMDB, setResultadosTMDB] = useState<TmdbMovie[]>([])
   const [buscandoTMDB, setBuscandoTMDB] = useState(false)
@@ -696,7 +710,7 @@ function App() {
   }, [serieSeleccionada?.id, serieSeleccionada?.number_of_seasons, serieSeleccionada?.number_of_episodes])
 
 
-  const [favoritasTMDB, setFavoritasTMDB] = useState<TmdbMovie[]>([])
+  const [pendientesTMDB, setPendientesTMDB] = useState<TmdbMovie[]>([])
   const [vistasTMDB, setVistasTMDB] = useState<TmdbMovie[]>([])
 
 useEffect(() => {
@@ -771,27 +785,28 @@ setVistasTMDB(peliculasVistasUnicas)
 }, [session])
 useEffect(() => {
   if (!session?.user) {
-    setFavoritasTMDB([])
+    setPendientesTMDB([])
     return
   }
 
-  const cargarFavoritosSupabase = async () => {
+  const cargarPendientesSupabase = async () => {
     const { data, error } = await supabase
       .from('user_movies')
       .select('*')
       .eq('user_id', session.user.id)
       .eq('favorite', true)
+      .eq('watched', false)
       .eq('media_type', 'movie')
-      console.log('FAVORITOS SUPABASE - data:', data)
-console.log('FAVORITOS SUPABASE - error:', error)
+      console.log('PENDIENTES SUPABASE - data:', data)
+console.log('PENDIENTES SUPABASE - error:', error)
 console.log('PRIMER FAVORITO:', data?.[0])
 
     if (error) {
-      console.error('Error al cargar películas favoritas:', error)
+      console.error('Error al cargar películas pendientes:', error)
       return
     }
 
-    const peliculasFavoritas: TmdbMovie[] = (data ?? []).map((pelicula) => ({
+    const peliculasPendientes: TmdbMovie[] = (data ?? []).map((pelicula) => ({
     id: pelicula.tmdb_id,
     title: pelicula.title,
     poster_path: pelicula.poster_path,
@@ -800,13 +815,13 @@ console.log('PRIMER FAVORITO:', data?.[0])
 }))
 console.log(
   "PELÍCULAS FAVORITAS CONVERTIDAS:",
-  JSON.stringify(peliculasFavoritas, null, 2)
+  JSON.stringify(peliculasPendientes, null, 2)
 )
 
-    setFavoritasTMDB(peliculasFavoritas)
+    setPendientesTMDB(peliculasPendientes)
   }
 
-  cargarFavoritosSupabase()
+  cargarPendientesSupabase()
 }, [session])
 
   const cargarSeriesDesdeSupabase = async () => {
@@ -860,11 +875,13 @@ console.log(
     }),
   )
 
-  setFavoritasSeriesTMDB(
+  setSeriesGuardadasTMDB(series)
+
+  setPendientesSeriesTMDB(
     series.filter((serie) =>
       data?.some(
         (guardada) =>
-          guardada.serie_id === serie.id && guardada.favorita === true,
+          guardada.serie_id === serie.id && guardada.favorita === true && guardada.vista !== true,
       ),
     ),
   )
@@ -878,8 +895,9 @@ console.log(
     ),
   )
 }
-  const [favoritasSeriesTMDB, setFavoritasSeriesTMDB] = useState<TmdbSeries[]>([])
-  
+  const [pendientesSeriesTMDB, setPendientesSeriesTMDB] = useState<TmdbSeries[]>([])
+  const [seriesGuardadasTMDB, setSeriesGuardadasTMDB] = useState<TmdbSeries[]>([])
+  const [seriesEnProcesoTMDB, setSeriesEnProcesoTMDB] = useState<TmdbSeries[]>([])
 
   const [vistasSeriesTMDB, setVistasSeriesTMDB] = useState<TmdbSeries[]>([])
 
@@ -889,6 +907,65 @@ console.log(
   const [temporadaSeleccionada, setTemporadaSeleccionada] = useState<number | null>(null)
   const [logrosNotificacion, setLogrosNotificacion] = useState<AchievementProgress[]>([])
   const [cargandoGenerosLogros, setCargandoGenerosLogros] = useState(false)
+
+  useEffect(() => {
+    const idsVistas = new Set(vistasSeriesTMDB.map((serie) => String(serie.id)))
+    const enProceso = seriesGuardadasTMDB.filter((serie) => {
+      const episodios = episodiosVistos[String(serie.id)] || []
+      return episodios.length > 0 && !idsVistas.has(String(serie.id))
+    })
+    setSeriesEnProcesoTMDB(enProceso)
+    setPendientesSeriesTMDB((actuales) => actuales.filter((serie) => !enProceso.some((item) => item.id === serie.id)))
+  }, [episodiosVistos, vistasSeriesTMDB, seriesGuardadasTMDB])
+
+  // Totales de episodios para las tarjetas de "En proceso". Se consultan en TMDB
+  // solo para las series que tienen progreso y se guardan en memoria para no repetir
+  // peticiones innecesarias.
+  const [totalesEpisodiosPorSerie, setTotalesEpisodiosPorSerie] = useState<Record<string, number>>({})
+
+  useEffect(() => {
+    let cancelado = false
+
+    const cargarTotales = async () => {
+      const pendientes = seriesEnProcesoTMDB.filter((serie) => {
+        const id = String(serie.id)
+        return !totalesEpisodiosPorSerie[id] && !serie.number_of_episodes
+      })
+
+      if (pendientes.length === 0) return
+
+      const apiKey = import.meta.env.VITE_TMDB_API_KEY
+      if (!apiKey) return
+
+      const resultados = await Promise.all(
+        pendientes.map(async (serie) => {
+          try {
+            const respuesta = await fetchTMDBSafe(
+              `https://api.themoviedb.org/3/tv/${serie.id}?api_key=${apiKey}&language=es-ES`,
+            )
+            if (!respuesta.ok) return null
+            const datos: TmdbSeriesDetails = await respuesta.json()
+            const total = contarEpisodiosTemporadasPrincipales(datos.seasons) || datos.number_of_episodes || 0
+            return total > 0 ? [String(serie.id), total] as const : null
+          } catch {
+            return null
+          }
+        }),
+      )
+
+      if (cancelado) return
+      setTotalesEpisodiosPorSerie((actuales) => {
+        const nuevas = { ...actuales }
+        resultados.forEach((resultado) => {
+          if (resultado) nuevas[resultado[0]] = resultado[1]
+        })
+        return nuevas
+      })
+    }
+
+    cargarTotales()
+    return () => { cancelado = true }
+  }, [seriesEnProcesoTMDB])
 const cargarEpisodiosTemporada = async (temporada: number) => {
   if (!serieSeleccionada) return
 
@@ -1077,7 +1154,10 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
   const serieCompleta = totalEpisodios > 0 && episodios.length >= totalEpisodios
   const yaEstaVista = vistasSeriesTMDB.some((vista) => vista.id === serie.id)
 
-  if (serieCompleta === yaEstaVista) return
+  // Solo salimos si el estado de VISTA ya es correcto.
+  // Una serie incompleta y no vista NO debe provocar un return: en ese caso
+  // necesitamos registrarla como EN PROCESO cuando ya existe algún episodio.
+  if (serieCompleta && yaEstaVista) return
 
   if (serieCompleta) {
     const tiempoTotal = episodios.reduce(
@@ -1111,6 +1191,7 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
         .from('user_series')
         .update({
         vista: true,
+        favorita: false,
         duracion: tiempoTotal,
         ...(serie.first_air_date ? { first_air_date: serie.first_air_date } : {}),
       })
@@ -1151,12 +1232,21 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
   }
 
   if (serieGuardada) {
-    if (serieGuardada.favorita) {
+    if (episodios.length > 0) {
+      // En cuanto existe progreso, la serie pasa automáticamente a EN PROCESO.
+      // Nunca debe seguir siendo pendiente.
       const { error } = await supabase
         .from('user_series')
-        .update({ vista: false })
+        .update({ vista: false, favorita: false })
         .eq('id', serieGuardada.id)
-      if (error) console.error('Error al quitar la serie como vista:', error)
+      if (error) console.error('Error guardando la serie en proceso:', error)
+    } else if (serieGuardada.favorita) {
+      // Sin episodios, una serie pendiente sigue siendo pendiente.
+      const { error } = await supabase
+        .from('user_series')
+        .update({ vista: false, favorita: true })
+        .eq('id', serieGuardada.id)
+      if (error) console.error('Error manteniendo la serie pendiente:', error)
     } else {
       const { error } = await supabase
         .from('user_series')
@@ -1164,6 +1254,33 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
         .eq('id', serieGuardada.id)
       if (error) console.error('Error al eliminar la serie:', error)
     }
+  } else if (episodios.length > 0) {
+    // Si el usuario empieza una serie directamente desde un episodio, creamos
+    // la fila de colección automáticamente para que EN PROCESO sobreviva al refresco.
+    const { error } = await supabase.from('user_series').insert({
+      user_id: session.user.id,
+      serie_id: serie.id,
+      name: serie.name,
+      poster_path: serie.poster_path,
+      first_air_date: serie.first_air_date ?? null,
+      vote_average: serie.vote_average,
+      favorita: false,
+      vista: false,
+      duracion: serie.tiempoTotal ?? 0,
+    })
+    if (error) console.error('Error creando la serie en proceso:', error)
+  }
+
+  if (episodios.length > 0) {
+    const baseSerie: TmdbSeries = {
+      ...serie,
+      tiempoTotal: serie.tiempoTotal ?? 0,
+    }
+    setPendientesSeriesTMDB((actuales) => actuales.filter((item) => item.id !== serie.id))
+    setSeriesEnProcesoTMDB((actuales) => actuales.some((item) => item.id === serie.id) ? actuales : [...actuales, baseSerie])
+    setSeriesGuardadasTMDB((actuales) => actuales.some((item) => item.id === serie.id) ? actuales : [...actuales, baseSerie])
+  } else {
+    setSeriesEnProcesoTMDB((actuales) => actuales.filter((item) => item.id !== serie.id))
   }
 }
 
@@ -1179,7 +1296,7 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
       const datos: TmdbSeriesDetails = await respuestaSerie.json()
       const temporadas = (datos.seasons || [])
         .map((temporada) => temporada.season_number)
-        .filter((numero) => numero >= 0)
+        .filter((numero) => numero >= 1)
 
       const resultados = await Promise.all(
         temporadas.map(async (numeroTemporada) => {
@@ -1495,8 +1612,8 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
       const enrichedSeries = await enriquecerColeccionAmigo(series, 'tv')
       const enrichedEpisodes = await enriquecerEpisodiosDeAmigo(episodes, enrichedSeries)
       const achievements = calcularLogrosDeColeccion(enrichedMovies, enrichedSeries, enrichedEpisodes)
-      const favoritos = Number(resultado.stats?.favorites ?? 0)
-      const friend: Friend = { ...amigo, name: perfil.display_name || perfil.username || amigo.name, avatar: perfil.avatar_url || amigo.avatar, movies: enrichedMovies.length, series: enrichedSeries.length, favorites: favoritos }
+      const pendientes = Number(resultado.stats?.favorites ?? 0)
+      const friend: Friend = { ...amigo, name: perfil.display_name || perfil.username || amigo.name, avatar: perfil.avatar_url || amigo.avatar, movies: enrichedMovies.length, series: enrichedSeries.length, favorites: pendientes }
       setAmigoSeleccionado(friend)
       setAmigoPerfilData({ profile: { ...perfil, id: amigo.id }, movies: enrichedMovies, series: enrichedSeries, episodes: enrichedEpisodes, achievements })
     } catch (error: any) {
@@ -1667,68 +1784,81 @@ const sincronizarSerieVistaConEpisodios = async (serie: TmdbSeriesDetails, episo
     setPagina('amigos')
   }
 
-  const cambiarFavoritoTMDB = async (pelicula: TmdbMovie) => {
-  if (!session) return
+  const cambiarPendienteTMDB = async (pelicula: TmdbMovie) => {
+    if (!session?.user) return
 
-  const existe = favoritasTMDB.some(
-    (favorita) => favorita.id === pelicula.id
-  )
+    const existe = pendientesTMDB.some((pendiente) => pendiente.id === pelicula.id)
 
-  // Si ya es favorita → eliminar de Supabase
-  if (existe) {
-    const { error } = await supabase
-      .from('user_movies')
-      .delete()
-      .eq('user_id', session.user.id)
-      .eq('tmdb_id', pelicula.id)
-      .eq('favorite', true)
+    if (existe) {
+      const { error } = await supabase
+        .from('user_movies')
+        .delete()
+        .eq('user_id', session.user.id)
+        .eq('tmdb_id', pelicula.id)
+        .eq('favorite', true)
+        .eq('watched', false)
 
-    if (error) {
-      console.error('Error al eliminar favorita:', error)
+      if (error) {
+        console.error('Error al quitar la película de pendientes:', error)
+        return
+      }
+
+      setPendientesTMDB((actuales) => actuales.filter((item) => item.id !== pelicula.id))
       return
     }
 
-    setFavoritasTMDB((actuales) =>
-      actuales.filter((favorita) => favorita.id !== pelicula.id)
-    )
+    // Si ya está vista, no la convertimos en pendiente.
+    if (vistasTMDB.some((vista) => vista.id === pelicula.id)) return
 
-    return
+    // Reutilizamos la fila existente si la hay para evitar duplicados.
+    const { data: existente, error: errorBusqueda } = await supabase
+      .from('user_movies')
+      .select('id')
+      .eq('user_id', session.user.id)
+      .eq('tmdb_id', pelicula.id)
+      .eq('media_type', 'movie')
+      .maybeSingle()
+
+    if (errorBusqueda) {
+      console.error('Error buscando la película:', errorBusqueda)
+      return
+    }
+
+    if (existente) {
+      const { error } = await supabase
+        .from('user_movies')
+        .update({ favorite: true, watched: false })
+        .eq('id', existente.id)
+      if (error) {
+        console.error('Error al guardar la película como pendiente:', error)
+        return
+      }
+    } else {
+      const { error } = await supabase.from('user_movies').insert({
+        user_id: session.user.id,
+        tmdb_id: pelicula.id,
+        title: pelicula.title,
+        poster_path: pelicula.poster_path ?? null,
+        release_date: pelicula.release_date ?? null,
+        vote_average: pelicula.vote_average ?? 0,
+        media_type: 'movie',
+        watched: false,
+        favorite: true,
+      })
+      if (error) {
+        console.error('Error al guardar la película como pendiente:', error)
+        return
+      }
+    }
+
+    setPendientesTMDB((actuales) => actuales.some((item) => item.id === pelicula.id) ? actuales : [...actuales, pelicula])
   }
 
-  // Guardar favorita en Supabase
-  const { data, error } = await supabase
-    .from('user_movies')
-    .insert({
-    user_id: session.user.id,
-    tmdb_id: pelicula.id,
-    title: pelicula.title,
-    poster_path: pelicula.poster_path ?? null,
-    release_date: pelicula.release_date ?? null,
-    vote_average: pelicula.vote_average ?? 0,
-    media_type: 'movie',
-    watched: false,
-    favorite: true,
-})
-    .select()
-    console.log('INSERT FAVORITO - data:', data)
-console.log('INSERT FAVORITO - error:', error)
-
-  if (error) {
-    console.error('Error al guardar favorita:', error)
-    return
-  }
-
-  setFavoritasTMDB((actuales) => [...actuales, pelicula])
-}
 const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
-  if (!session?.user) {
-    console.error('No hay un usuario autenticado')
-    return
-  }
+  if (!session?.user) return
 
   const existe = vistasTMDB.some((vista) => vista.id === pelicula.id)
 
-  // Si ya está vista → la eliminamos de Supabase
   if (existe) {
     const { error } = await supabase
       .from('user_movies')
@@ -1738,61 +1868,69 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
       .eq('watched', true)
 
     if (error) {
-      console.error('Error al eliminar la película vista:', error)
+      console.error('Error al quitar la película vista:', error)
       return
     }
 
-    setVistasTMDB((actuales) =>
-      actuales.filter((vista) => vista.id !== pelicula.id)
-    )
-
+    setVistasTMDB((actuales) => actuales.filter((vista) => vista.id !== pelicula.id))
     return
   }
 
   let peliculaCompleta = pelicula
-
-  // Obtener duración desde TMDB
   try {
     const apiKey = import.meta.env.VITE_TMDB_API_KEY
-
-    const respuesta = await fetch(
-      `https://api.themoviedb.org/3/movie/${pelicula.id}?api_key=${apiKey}&language=es-ES`,
-    )
-
+    const respuesta = await fetch(`https://api.themoviedb.org/3/movie/${pelicula.id}?api_key=${apiKey}&language=es-ES`)
     if (respuesta.ok) {
       const datos: TmdbMovieDetails = await respuesta.json()
-
-      peliculaCompleta = {
-        ...pelicula,
-        runtime: datos.runtime ?? null,
-        genres: datos.genres ?? [],
-      }
+      peliculaCompleta = { ...pelicula, runtime: datos.runtime ?? null, genres: datos.genres ?? [] }
     }
   } catch (error) {
-    console.error(
-      'No se pudo obtener la duración de la película:',
-      error
-    )
+    console.error('No se pudo obtener la duración de la película:', error)
   }
 
-  // Guardar en Supabase
-  const { error } = await supabase
+  // Si estaba pendiente, convertimos esa misma fila en vista.
+  const { data: existente, error: errorBusqueda } = await supabase
     .from('user_movies')
-    .insert({
+    .select('id')
+    .eq('user_id', session.user.id)
+    .eq('tmdb_id', pelicula.id)
+    .eq('media_type', 'movie')
+    .maybeSingle()
+
+  if (errorBusqueda) {
+    console.error('Error buscando la película:', errorBusqueda)
+    return
+  }
+
+  if (existente) {
+    const { error } = await supabase
+      .from('user_movies')
+      .update({ watched: true, favorite: false })
+      .eq('id', existente.id)
+    if (error) {
+      console.error('Error al marcar la película como vista:', error)
+      return
+    }
+  } else {
+    const { error } = await supabase.from('user_movies').insert({
       user_id: session.user.id,
       tmdb_id: peliculaCompleta.id,
       title: peliculaCompleta.title,
       poster_path: peliculaCompleta.poster_path ?? null,
+      release_date: peliculaCompleta.release_date ?? null,
+      vote_average: peliculaCompleta.vote_average ?? 0,
+      runtime: peliculaCompleta.runtime ?? null,
       media_type: 'movie',
       watched: true,
       favorite: false,
     })
-
-  if (error) {
-    console.error('Error al guardar la película vista:', error)
-    return
+    if (error) {
+      console.error('Error al guardar la película vista:', error)
+      return
+    }
   }
 
+  setPendientesTMDB((actuales) => actuales.filter((item) => item.id !== pelicula.id))
   setVistasTMDB((actuales) => [...actuales, peliculaCompleta])
 }
   useEffect(() => {
@@ -1828,86 +1966,65 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
     actualizarDuracionesPeliculas()
   }, [vistasTMDB])
 
-  const cambiarFavoritaSerieTMDB = async (serie: TmdbSeries) => {
-  if (!session) return
+  const cambiarPendienteSerieTMDB = async (serie: TmdbSeries) => {
+    if (!session?.user) return
 
-  const existe = favoritasSeriesTMDB.some(
-    (favorita) => favorita.id === serie.id,
-  )
+    if (vistasSeriesTMDB.some((vista) => vista.id === serie.id) || seriesEnProcesoTMDB.some((item) => item.id === serie.id)) return
 
-  const nuevaFavorita = !existe
+    const existe = pendientesSeriesTMDB.some((pendiente) => pendiente.id === serie.id)
 
-  // Actualizamos la pantalla
-  setFavoritasSeriesTMDB((actuales) =>
-    nuevaFavorita
-      ? [...actuales, serie]
-      : actuales.filter((favorita) => favorita.id !== serie.id),
-  )
+    const { data: serieGuardada, error: errorBusqueda } = await supabase
+      .from('user_series')
+      .select('id, vista')
+      .eq('user_id', session.user.id)
+      .eq('serie_id', serie.id)
+      .maybeSingle()
 
-  // Comprobamos si esta serie ya existe en la base de datos
-  const { data: serieGuardada, error: errorBusqueda } = await supabase
-    .from('user_series')
-    .select('id, vista')
-    .eq('user_id', session.user.id)
-    .eq('serie_id', serie.id)
-    .maybeSingle()
-
-  if (errorBusqueda) {
-    console.error('Error al buscar la serie:', errorBusqueda)
-    return
-  }
-
-  // Si la serie ya existe, actualizamos favorita
-  if (serieGuardada) {
-    if (!nuevaFavorita && !serieGuardada.vista) {
-      // Si ya no es favorita y tampoco está marcada como vista,
-      // eliminamos la fila porque ya no necesitamos guardarla.
-      const { error } = await supabase
-        .from('user_series')
-        .delete()
-        .eq('id', serieGuardada.id)
-
-      if (error) {
-        console.error('Error al eliminar la serie:', error)
-      }
-
+    if (errorBusqueda) {
+      console.error('Error al buscar la serie:', errorBusqueda)
       return
     }
 
-    const { error } = await supabase
-      .from('user_series')
-      .update({
-        favorita: nuevaFavorita,
-        ...(serie.first_air_date ? { first_air_date: serie.first_air_date } : {}),
+    if (existe) {
+      if (serieGuardada) {
+        const { error } = await supabase.from('user_series').delete().eq('id', serieGuardada.id)
+        if (error) {
+          console.error('Error al quitar la serie de pendientes:', error)
+          return
+        }
+      }
+      setPendientesSeriesTMDB((actuales) => actuales.filter((item) => item.id !== serie.id))
+      setSeriesGuardadasTMDB((actuales) => actuales.filter((item) => item.id !== serie.id))
+      return
+    }
+
+    if (serieGuardada) {
+      const { error } = await supabase.from('user_series').update({ favorita: true, vista: false }).eq('id', serieGuardada.id)
+      if (error) {
+        console.error('Error al guardar la serie como pendiente:', error)
+        return
+      }
+    } else {
+      const { error } = await supabase.from('user_series').insert({
+        user_id: session.user.id,
+        serie_id: serie.id,
+        name: serie.name,
+        poster_path: serie.poster_path,
+        first_air_date: serie.first_air_date ?? null,
+        vote_average: serie.vote_average,
+        favorita: true,
+        vista: false,
+        duracion: serie.tiempoTotal ?? 0,
       })
-      .eq('id', serieGuardada.id)
-
-    if (error) {
-      console.error('Error al actualizar la favorita:', error)
+      if (error) {
+        console.error('Error al guardar la serie como pendiente:', error)
+        return
+      }
     }
 
-    return
+    setPendientesSeriesTMDB((actuales) => actuales.some((item) => item.id === serie.id) ? actuales : [...actuales, serie])
+    setSeriesGuardadasTMDB((actuales) => actuales.some((item) => item.id === serie.id) ? actuales : [...actuales, serie])
   }
-
-  // Si no existía, creamos una nueva fila
-  if (nuevaFavorita) {
-    const { error } = await supabase.from('user_series').insert({
-      user_id: session.user.id,
-      serie_id: serie.id,
-      name: serie.name,
-      poster_path: serie.poster_path,
-      first_air_date: serie.first_air_date ?? null,
-      vote_average: serie.vote_average,
-      favorita: true,
-      vista: false,
-      duracion: serie.tiempoTotal ?? 0,
-    })
-
-    if (error) {
-      console.error('Error al guardar la favorita:', error)
-    }
-  }
-}
 
   // Calcula la duración real de una serie sumando la duración de sus episodios.
   // TMDB no siempre rellena `episode_run_time` en los detalles de la serie,
@@ -2033,6 +2150,8 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
 
     const serieCompleta: TmdbSeries = { ...serie, tiempoTotal }
 
+    setPendientesSeriesTMDB((actuales) => actuales.filter((item) => item.id !== serie.id))
+    setSeriesEnProcesoTMDB((actuales) => actuales.filter((item) => item.id !== serie.id))
     setVistasSeriesTMDB((actuales) =>
       actuales.some((vista) => vista.id === serie.id) ? actuales : [...actuales, serieCompleta],
     )
@@ -2061,6 +2180,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
         .from('user_series')
         .update({
         vista: true,
+        favorita: false,
         duracion: tiempoTotal,
         ...(serie.first_air_date ? { first_air_date: serie.first_air_date } : {}),
       })
@@ -2349,7 +2469,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
   }
 
 
-  const tmdbFavoritas = favoritasTMDB
+  const tmdbPendientes = pendientesTMDB
   const tmdbVistas = vistasTMDB
 
   useEffect(() => {
@@ -2554,8 +2674,17 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
   }
 
   const renderSeriesCard = (serie: TmdbSeries) => {
-    const esFavorita = favoritasSeriesTMDB.some((favorita) => favorita.id === serie.id)
+    const esPendiente = pendientesSeriesTMDB.some((pendiente) => pendiente.id === serie.id)
     const estaVista = vistasSeriesTMDB.some((vista) => vista.id === serie.id)
+    const estaEnProceso = seriesEnProcesoTMDB.some((item) => item.id === serie.id)
+    const episodiosVistosSerie = episodiosVistos[String(serie.id)] || []
+    const episodiosVistosUnicos = new Set(
+      episodiosVistosSerie.map((episodio) => `${episodio.season_number}:${episodio.episode_number}`),
+    ).size
+    const totalEpisodios = totalesEpisodiosPorSerie[String(serie.id)] || serie.number_of_episodes || 0
+    const porcentaje = estaEnProceso && totalEpisodios > 0
+      ? Math.min(100, Math.round((episodiosVistosUnicos / totalEpisodios) * 100))
+      : 0
 
     return (
       <div
@@ -2605,21 +2734,38 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
             ⭐ {serie.vote_average.toFixed(1)}
           </p>
 
-          <div style={{ display: 'flex', gap: '8px', marginTop: '14px' }}>
+          {estaEnProceso && (
+            <div style={{ marginTop: '13px', padding: '11px 12px', borderRadius: '12px', background: 'rgba(255,255,255,0.055)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '7px' }}>
+                <span style={{ fontSize: '12px', fontWeight: 700, letterSpacing: '0.04em', opacity: 0.78 }}>PROGRESO</span>
+                <span style={{ fontSize: '15px', fontWeight: 900 }}>{totalEpisodios > 0 ? `${porcentaje}%` : '...'}</span>
+              </div>
+              <div style={{ height: '8px', borderRadius: '999px', overflow: 'hidden', background: 'rgba(255,255,255,0.10)', boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.25)' }}>
+                <div style={{ width: `${porcentaje}%`, height: '100%', borderRadius: '999px', background: 'linear-gradient(90deg, #ff4f9a 0%, #ffb52e 55%, #55e69b 100%)', boxShadow: porcentaje > 0 ? '0 0 12px rgba(255,79,154,0.35)' : 'none', transition: 'width 0.45s ease' }} />
+              </div>
+              <div style={{ marginTop: '7px', fontSize: '12px', opacity: 0.65 }}>
+                {totalEpisodios > 0 ? `${episodiosVistosUnicos} de ${totalEpisodios} episodios vistos` : 'Calculando episodios...'}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '8px', marginTop: estaEnProceso ? '12px' : '14px' }}>
             <button
-              onClick={() => cambiarFavoritaSerieTMDB(serie)}
+              onClick={() => cambiarPendienteSerieTMDB(serie)}
+              disabled={estaEnProceso || estaVista}
               style={{
                 flex: 1,
                 border: 'none',
                 borderRadius: '10px',
                 padding: '10px 8px',
-                cursor: 'pointer',
+                cursor: (estaEnProceso || estaVista) ? 'default' : 'pointer',
+                opacity: (estaEnProceso || estaVista) ? 0.9 : 1,
                 fontSize: '14px',
-                background: esFavorita ? 'rgba(255, 70, 140, 0.25)' : 'rgba(255,255,255,0.08)',
-                color: esFavorita ? '#ff4f9a' : 'inherit',
+                background: esPendiente ? 'rgba(255, 70, 140, 0.25)' : estaEnProceso ? 'rgba(255, 193, 7, 0.16)' : 'rgba(255,255,255,0.08)',
+                color: esPendiente ? '#ff4f9a' : 'inherit',
               }}
             >
-              {esFavorita ? '❤️ Favorita' : '🤍 Favorito'}
+              {esPendiente ? '⏳ Pendiente' : '＋ Añadir a pendientes'}
             </button>
 
             <button
@@ -2652,7 +2798,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
   }
 
   const renderCatalogoCard = (pelicula: TmdbMovie) => {
-    const esFavorita = favoritasTMDB.some((favorita) => favorita.id === pelicula.id)
+    const esPendiente = pendientesTMDB.some((pendiente) => pendiente.id === pelicula.id)
     const estaVista = vistasTMDB.some((vista) => vista.id === pelicula.id)
 
     return (
@@ -2689,11 +2835,11 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
           <div className="netflix-movie-actions">
             <button
               type="button"
-              className={esFavorita ? 'netflix-action active-pink' : 'netflix-action'}
-              onClick={() => cambiarFavoritoTMDB(pelicula)}
-              aria-label={esFavorita ? 'Quitar de favoritos' : 'Añadir a favoritos'}
+              className={esPendiente ? 'netflix-action active-pink' : 'netflix-action'}
+              onClick={() => cambiarPendienteTMDB(pelicula)}
+              aria-label={esPendiente ? 'Quitar de pendientes' : 'Añadir a pendientes'}
             >
-              {esFavorita ? '♥' : '♡'}
+              {esPendiente ? '⏳' : '＋'}
             </button>
             <button
               type="button"
@@ -2710,7 +2856,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
   }
 
   const renderTmdbCard = (pelicula: TmdbMovie) => {
-    const esFavorita = favoritasTMDB.some((favorita) => favorita.id === pelicula.id)
+    const esPendiente = pendientesTMDB.some((pendiente) => pendiente.id === pelicula.id)
     const estaVista = vistasTMDB.some((vista) => vista.id === pelicula.id)
 
     return (
@@ -2776,7 +2922,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
 
           <div style={{ display: 'flex', gap: '8px', marginTop: '14px' }}>
             <button
-              onClick={() => cambiarFavoritoTMDB(pelicula)}
+              onClick={() => cambiarPendienteTMDB(pelicula)}
               style={{
                 flex: 1,
                 border: 'none',
@@ -2784,13 +2930,13 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 padding: '10px 8px',
                 cursor: 'pointer',
                 fontSize: '14px',
-                background: esFavorita
+                background: esPendiente
                   ? 'rgba(255, 70, 140, 0.25)'
                   : 'rgba(255,255,255,0.08)',
-                color: esFavorita ? '#ff4f9a' : 'inherit',
+                color: esPendiente ? '#ff4f9a' : 'inherit',
               }}
             >
-              {esFavorita ? '❤️ Favorita' : '🤍 Favorito'}
+              {esPendiente ? '⏳ Pendiente' : '＋ Añadir a pendientes'}
             </button>
 
             <button
@@ -2941,7 +3087,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
           <button
             className={`wg-nav-link ${pagina === 'coleccion' ? 'wg-nav-active' : ''}`}
             onClick={() => {
-              setFiltro('favoritas')
+              setFiltro('pendientes')
               setTipoColeccion('peliculas')
               setPagina('coleccion')
             }}
@@ -3062,7 +3208,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
             }}
           >
             {(() => {
-              const totalFavoritos = favoritasTMDB.length + favoritasSeriesTMDB.length
+              const totalPendientes = pendientesTMDB.length + pendientesSeriesTMDB.length
               const minutosPeliculas = vistasTMDB.reduce(
                 (total, pelicula) => total + (pelicula.runtime || 0),
                 0,
@@ -3107,15 +3253,15 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 })),
               ].slice(0, 4)
 
-              const favoritosRecientes = [
-                ...favoritasSeriesTMDB.slice(-3).reverse().map((serie) => ({
+              const pendientesRecientes = [
+                ...pendientesSeriesTMDB.slice(-3).reverse().map((serie) => ({
                   id: `serie-${serie.id}`,
                   titulo: serie.name,
                   año: serie.first_air_date?.substring(0, 4) || '—',
                   poster: serie.poster_path,
                   tipo: 'Serie',
                 })),
-                ...favoritasTMDB.slice(-3).reverse().map((pelicula) => ({
+                ...pendientesTMDB.slice(-3).reverse().map((pelicula) => ({
                   id: `movie-${pelicula.id}`,
                   titulo: pelicula.title,
                   año: pelicula.release_date?.substring(0, 4) || '—',
@@ -3157,7 +3303,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                         </h1>
                         <p className="home-hero-description">
                           Descubre, guarda y comparte todo lo que ves. Películas, series,
-                          favoritos, estadísticas y logros, todo en un solo sitio.
+                          pendientes, estadísticas y logros, todo en un solo sitio.
                         </p>
 
                         <div className="home-hero-actions">
@@ -3167,7 +3313,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                           <button
                             className="secondary"
                             onClick={() => {
-                              setFiltro('favoritas')
+                              setFiltro('pendientes')
                               setTipoColeccion('peliculas')
                               setPagina('coleccion')
                             }}
@@ -3276,7 +3422,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                       {[
                         { icon: '▣', value: vistasTMDB.length, label: 'Películas vistas', tone: 'pink' },
                         { icon: '◫', value: vistasSeriesTMDB.length, label: 'Series vistas', tone: 'yellow' },
-                        { icon: '♡', value: totalFavoritos, label: 'Favoritos', tone: 'purple' },
+                        { icon: '♡', value: totalPendientes, label: 'Pendientes', tone: 'purple' },
                         { icon: '◷', value: tiempoTexto, label: 'Tiempo invertido', tone: 'blue' },
                         { icon: '♧', value: friends.length, label: 'Amigos', tone: 'green' },
                       ].map((dato) => (
@@ -3405,7 +3551,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                     )}
                   </section>
 
-                  {/* ================= FAVORITOS ================= */}
+                  {/* ================= PENDIENTES ================= */}
                   <section style={{ marginBottom: '38px' }}>
                     <div
                       style={{
@@ -3419,21 +3565,21 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                         <p className="small-title" style={{ marginBottom: '5px' }}>
                           TU SELECCIÓN
                         </p>
-                        <h2 className="home-premium-section-title" style={{ margin: 0 }}>Favoritos recientes</h2>
+                        <h2 className="home-premium-section-title" style={{ margin: 0 }}>Pendientes recientes</h2>
                       </div>
                       <button
                         className="secondary"
                         onClick={() => {
-                          setFiltro('favoritas')
+                          setFiltro('pendientes')
                           setTipoColeccion('peliculas')
                           setPagina('coleccion')
                         }}
                       >
-                        Ver favoritos →
+                        Ver pendientes →
                       </button>
                     </div>
 
-                    {favoritosRecientes.length > 0 ? (
+                    {pendientesRecientes.length > 0 ? (
                       <div
                         style={{
                           display: 'grid',
@@ -3441,7 +3587,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                           gap: '14px',
                         }}
                       >
-                        {favoritosRecientes.map((item) => (
+                        {pendientesRecientes.map((item) => (
                           <div key={item.id} className="home-favorite-card" style={{ minWidth: 0 }}>
                             <div
                               className="home-favorite-poster"
@@ -3504,7 +3650,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                         <div className="home-empty-icon pink">♡</div>
                         <h3 style={{ margin: '0 0 7px' }}>Tu lista está vacía</h3>
                         <p style={{ margin: 0, opacity: 0.65 }}>
-                          Añade tus películas y series favoritas para verlas aquí.
+                          Añade tus películas y series pendientes para verlas aquí.
                         </p>
                       </div>
                     )}
@@ -3715,7 +3861,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                   <div className="netflix-section-heading">
                     <div>
                       <span className="section-kicker yellow">LOS MEJOR VALORADOS</span>
-                      <h2>Favoritas de la comunidad</h2>
+                      <h2>Pendientes de la comunidad</h2>
                     </div>
                     <span className="netflix-scroll-hint">Desliza para explorar →</span>
                   </div>
@@ -3749,18 +3895,18 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
           <section className="welcome movies-page">
             <p className="small-title">TU COLECCIÓN PERSONAL</p>
 
-            <h1 style={{ background: 'linear-gradient(100deg, #ffe08a 0%, #ff83bd 46%, #e59bff 76%, #8c9cff 100%)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent', textShadow: '0 10px 40px rgba(255,79,159,.16)' }}>❤️ Mi colección</h1>
+            <h1 style={{ background: 'linear-gradient(100deg, #ffe08a 0%, #ff83bd 46%, #e59bff 76%, #8c9cff 100%)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent', textShadow: '0 10px 40px rgba(255,79,159,.16)' }}>🎬 Mi colección</h1>
 
             <p className="description collection-description">
-              Todo lo que has guardado, visto y quieres volver a disfrutar, reunido en un solo lugar.
+              Todo lo que quieres ver, estás viendo y ya has visto, reunido en un solo lugar.
             </p>
 
             <div className="collection-stats" aria-label="Resumen de tu colección">
               <div className="collection-stat-card collection-stat-pink">
-                <div className="collection-stat-icon">♡</div>
+                <div className="collection-stat-icon">⏳</div>
                 <div className="collection-stat-copy">
-                  <strong>{tmdbFavoritas.length}</strong>
-                  <span>Películas favoritas</span>
+                  <strong>{tmdbPendientes.length}</strong>
+                  <span>Películas pendientes</span>
                 </div>
               </div>
               <div className="collection-stat-card collection-stat-blue">
@@ -3771,10 +3917,10 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 </div>
               </div>
               <div className="collection-stat-card collection-stat-purple">
-                <div className="collection-stat-icon">♡</div>
+                <div className="collection-stat-icon">⏳</div>
                 <div className="collection-stat-copy">
-                  <strong>{favoritasSeriesTMDB.length}</strong>
-                  <span>Series favoritas</span>
+                  <strong>{pendientesSeriesTMDB.length}</strong>
+                  <span>Series pendientes</span>
                 </div>
               </div>
               <div className="collection-stat-card collection-stat-cyan">
@@ -3794,7 +3940,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 className={tipoColeccion === 'peliculas' ? 'filter-active' : ''}
                 onClick={() => {
                   setTipoColeccion('peliculas')
-                  setFiltro('favoritas')
+                  setFiltro('pendientes')
                 }}
               >
                 🎬 Películas
@@ -3804,7 +3950,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 className={tipoColeccion === 'series' ? 'filter-active' : ''}
                 onClick={() => {
                   setTipoColeccion('series')
-                  setFiltro('favoritas')
+                  setFiltro('pendientes')
                 }}
               >
                 📺 Series
@@ -3816,11 +3962,20 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 <span className="collection-control-label">MOSTRAR</span>
                 <div className="movie-filters collection-view-filters">
               <button
-                className={filtro === 'favoritas' ? 'filter-active' : ''}
-                onClick={() => setFiltro('favoritas')}
+                className={filtro === 'pendientes' ? 'filter-active' : ''}
+                onClick={() => setFiltro('pendientes')}
               >
-                ❤️ Favoritas
+                ⏳ Pendientes
               </button>
+
+              {tipoColeccion === 'series' && (
+                <button
+                  className={filtro === 'en-proceso' ? 'filter-active' : ''}
+                  onClick={() => setFiltro('en-proceso')}
+                >
+                  ▶️ En proceso
+                </button>
+              )}
 
               <button
                 className={filtro === 'vistas' ? 'filter-active' : ''}
@@ -3832,22 +3987,22 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
               </div>
             </div>
 
-            {tipoColeccion === 'peliculas' && filtro === 'favoritas' && (
+            {tipoColeccion === 'peliculas' && filtro === 'pendientes' && (
               <section className="movie-section">
                 <div className="section-title">
-                  <h2>❤️ Mis películas favoritas</h2>
-                  <span className="movie-count">{tmdbFavoritas.length} películas</span>
+                  <h2>⏳ Mis películas pendientes</h2>
+                  <span className="movie-count">{tmdbPendientes.length} películas</span>
                 </div>
 
-                {tmdbFavoritas.length > 0 ? (
+                {tmdbPendientes.length > 0 ? (
                   <div style={tmdbGridStyle}>
-                    {tmdbFavoritas.map(renderTmdbCard)}
+                    {tmdbPendientes.map(renderTmdbCard)}
                   </div>
                 ) : (
                   <div className="empty">
-                    <div>❤️</div>
-                    <h2>Aún no tienes películas favoritas</h2>
-                    <p>Busca una película en Películas y pulsa ❤️ Favorito para añadirla aquí.</p>
+                    <div>⏳</div>
+                    <h2>Aún no tienes películas pendientes</h2>
+                    <p>Busca una película en Películas y pulsa ⏳ Pendiente para añadirla aquí.</p>
                     <button className="primary" onClick={() => setPagina('peliculas')}>
                       🎬 Buscar películas
                     </button>
@@ -3880,22 +4035,45 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
               </section>
             )}
 
-            {tipoColeccion === 'series' && filtro === 'favoritas' && (
+            {tipoColeccion === 'series' && filtro === 'pendientes' && (
               <section className="movie-section">
                 <div className="section-title">
-                  <h2>❤️ Mis series favoritas</h2>
-                  <span className="movie-count">{favoritasSeriesTMDB.length} series</span>
+                  <h2>⏳ Mis series pendientes</h2>
+                  <span className="movie-count">{pendientesSeriesTMDB.length} series</span>
                 </div>
 
-                {favoritasSeriesTMDB.length > 0 ? (
+                {pendientesSeriesTMDB.length > 0 ? (
                   <div style={tmdbGridStyle}>
-                    {favoritasSeriesTMDB.map(renderSeriesCard)}
+                    {pendientesSeriesTMDB.map(renderSeriesCard)}
                   </div>
                 ) : (
                   <div className="empty">
-                    <div>❤️</div>
-                    <h2>Aún no tienes series favoritas</h2>
-                    <p>Busca una serie en Series y pulsa ❤️ Favorito para añadirla aquí.</p>
+                    <div>⏳</div>
+                    <h2>Aún no tienes series pendientes</h2>
+                    <p>Busca una serie en Series y pulsa ⏳ Pendiente para añadirla aquí.</p>
+                    <button className="primary" onClick={() => irASeries()}>
+                      📺 Buscar series
+                    </button>
+                  </div>
+                )}
+              </section>
+            )}
+
+            {tipoColeccion === 'series' && filtro === 'en-proceso' && (
+              <section className="movie-section">
+                <div className="section-title">
+                  <h2>▶️ Series en proceso</h2>
+                  <span className="movie-count">{seriesEnProcesoTMDB.length} series</span>
+                </div>
+                {seriesEnProcesoTMDB.length > 0 ? (
+                  <div style={tmdbGridStyle}>
+                    {seriesEnProcesoTMDB.map(renderSeriesCard)}
+                  </div>
+                ) : (
+                  <div className="empty">
+                    <div>▶️</div>
+                    <h2>No tienes series en proceso</h2>
+                    <p>Cuando marques un episodio de una serie, aparecerá aquí hasta que la termines.</p>
                     <button className="primary" onClick={() => irASeries()}>
                       📺 Buscar series
                     </button>
@@ -4137,12 +4315,12 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
 
                     <div style={{ display: 'flex', gap: '10px', marginTop: '28px' }}>
                       <button
-                        className={favoritasTMDB.some((fav) => fav.id === peliculaSeleccionada.id) ? 'primary' : 'secondary'}
-                        onClick={() => cambiarFavoritoTMDB(peliculaSeleccionada)}
+                        className={pendientesTMDB.some((fav) => fav.id === peliculaSeleccionada.id) ? 'primary' : 'secondary'}
+                        onClick={() => cambiarPendienteTMDB(peliculaSeleccionada)}
                       >
-                        {favoritasTMDB.some((fav) => fav.id === peliculaSeleccionada.id)
-                          ? '❤️ Favorita'
-                          : '🤍 Añadir a favoritos'}
+                        {pendientesTMDB.some((fav) => fav.id === peliculaSeleccionada.id)
+                          ? '⏳ Pendiente'
+                          : '＋ Añadir a pendientes'}
                       </button>
 
                       <button
@@ -4168,7 +4346,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
             <p className="small-title">TU UNIVERSO DE SERIES</p>
             <h1><span className="series-title-icon">📺</span> Series<span className="series-title-dot">.</span></h1>
             <p className="description">
-              Busca series, guarda tus favoritas y lleva un registro de lo que ya has visto.
+              Busca series, guarda tus pendientes y lleva un registro de lo que ya has visto.
             </p>
 
             <div className="series-search" style={{ display: 'flex', gap: '10px', margin: '26px 0', maxWidth: '800px' }}>
@@ -4218,14 +4396,26 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
               </div>
             )}
 
-            {favoritasSeriesTMDB.length > 0 && (
+            {seriesEnProcesoTMDB.length > 0 && (
               <section className="movie-section">
                 <div className="section-title">
-                  <h2>❤️ Mis series favoritas</h2>
-                  <span className="movie-count">{favoritasSeriesTMDB.length} series</span>
+                  <h2>▶️ Continúa viendo</h2>
+                  <span className="movie-count">{seriesEnProcesoTMDB.length} series</span>
                 </div>
                 <div style={tmdbGridStyle}>
-                  {favoritasSeriesTMDB.map(renderSeriesCard)}
+                  {seriesEnProcesoTMDB.map(renderSeriesCard)}
+                </div>
+              </section>
+            )}
+
+            {pendientesSeriesTMDB.length > 0 && (
+              <section className="movie-section">
+                <div className="section-title">
+                  <h2>⏳ Mis series pendientes</h2>
+                  <span className="movie-count">{pendientesSeriesTMDB.length} series</span>
+                </div>
+                <div style={tmdbGridStyle}>
+                  {pendientesSeriesTMDB.map(renderSeriesCard)}
                 </div>
               </section>
             )}
@@ -4525,12 +4715,15 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
 
                     <div style={{ display: 'flex', gap: '10px', marginTop: '28px' }}>
                       <button
-                        className={favoritasSeriesTMDB.some((fav) => fav.id === serieSeleccionada.id) ? 'primary' : 'secondary'}
-                        onClick={() => cambiarFavoritaSerieTMDB(serieSeleccionada)}
+                        className={pendientesSeriesTMDB.some((fav) => fav.id === serieSeleccionada.id) ? 'primary' : 'secondary'}
+                        onClick={() => cambiarPendienteSerieTMDB(serieSeleccionada)}
+                        disabled={seriesEnProcesoTMDB.some((item) => item.id === serieSeleccionada.id) || vistasSeriesTMDB.some((vista) => vista.id === serieSeleccionada.id)}
                       >
-                        {favoritasSeriesTMDB.some((fav) => fav.id === serieSeleccionada.id)
-                          ? '❤️ Favorita'
-                          : '🤍 Añadir a favoritas'}
+                        {pendientesSeriesTMDB.some((fav) => fav.id === serieSeleccionada.id)
+                          ? '⏳ Pendiente'
+                          : seriesEnProcesoTMDB.some((item) => item.id === serieSeleccionada.id)
+                            ? '▶ En proceso'
+                            : '＋ Añadir a pendientes'}
                       </button>
 
                       <button
@@ -4566,10 +4759,10 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 (total, episodios) => total + (Array.isArray(episodios) ? episodios.length : 0),
                 0,
               )
-              const peliculasFavoritas = favoritasTMDB.length
-              const seriesFavoritas = favoritasSeriesTMDB.length
+              const peliculasPendientes = pendientesTMDB.length
+              const seriesPendientes = pendientesSeriesTMDB.length
               const totalVistos = peliculasVistas + seriesVistas
-              const totalFavoritos = peliculasFavoritas + seriesFavoritas
+              const totalPendientes = peliculasPendientes + seriesPendientes
 
               const minutosPeliculas = vistasTMDB.reduce(
                 (total, pelicula) => total + (pelicula.runtime || 0),
@@ -4636,7 +4829,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                 : 0
 
               const coleccionOrdenada = [
-                ...favoritasTMDB.map((pelicula) => ({
+                ...pendientesTMDB.map((pelicula) => ({
                   id: `movie-${pelicula.id}`,
                   title: pelicula.title,
                   year: pelicula.release_date?.substring(0, 4) || '—',
@@ -4644,7 +4837,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                   poster: pelicula.poster_path,
                   tipo: 'Película',
                 })),
-                ...favoritasSeriesTMDB.map((serie) => ({
+                ...pendientesSeriesTMDB.map((serie) => ({
                   id: `series-${serie.id}`,
                   title: serie.name,
                   year: serie.first_air_date?.substring(0, 4) || '—',
@@ -4708,7 +4901,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                         { icon:'🎬', value:peliculasVistas, label:'PELÍCULAS VISTAS', glow:'rgba(255,79,154,.16)' },
                         { icon:'📺', value:seriesVistas, label:'SERIES VISTAS', glow:'rgba(103,234,255,.14)' },
                         { icon:'🎞️', value:episodiosTotalesVistos, label:'EPISODIOS VISTOS', glow:'rgba(164,112,255,.14)' },
-                        { icon:'❤️', value:totalFavoritos, label:'FAVORITOS', glow:'rgba(255,105,180,.15)' },
+                        { icon:'❤️', value:totalPendientes, label:'PENDIENTES', glow:'rgba(255,105,180,.15)' },
                       ].map((estadistica,index) => (
                         <div
                           className="wg-stats-card"
@@ -4910,7 +5103,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                             opacity:.78,
                           }}
                         >
-                          🍿 {totalVistos} TÍTULOS · {totalFavoritos} FAVORITOS
+                          🍿 {totalVistos} TÍTULOS · {totalPendientes} PENDIENTES
                         </span>
                       </div>
                     </section>
@@ -4962,8 +5155,8 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
 
                   <section className="movie-section" style={{ marginTop: '42px' }}>
                     <div className="section-title">
-                      <h2>🏆 Tus favoritos mejor valorados</h2>
-                      <span className="movie-count">{totalFavoritos} favoritos</span>
+                      <h2>🏆 Tus pendientes mejor valorados</h2>
+                      <span className="movie-count">{totalPendientes} pendientes</span>
                     </div>
 
                     {coleccionOrdenada.length > 0 ? (
@@ -5033,7 +5226,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                       <div className="empty">
                         <div>📊</div>
                         <h2>Aún no hay estadísticas</h2>
-                        <p>Marca películas o series como vistas o favoritas y aparecerán aquí.</p>
+                        <p>Marca películas o series como vistas o pendientes y aparecerán aquí.</p>
                         <button className="primary" onClick={() => setPagina('peliculas')}>
                           🎬 Explorar películas
                         </button>
@@ -5052,7 +5245,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                   >
                     <p className="small-title" style={{ marginBottom: '8px' }}>TU RESUMEN</p>
                     <p style={{ margin: 0, lineHeight: 1.7, opacity: 0.8 }}>
-                      Has visto <strong>{totalVistos}</strong> títulos y tienes <strong>{totalFavoritos}</strong> favoritos guardados.
+                      Has visto <strong>{totalVistos}</strong> títulos y tienes <strong>{totalPendientes}</strong> pendientes guardados.
                       {peliculasVistas > seriesVistas
                         ? ' De momento ves más películas que series.'
                         : seriesVistas > peliculasVistas
@@ -5767,7 +5960,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                       <article><span>🎬</span><strong>{vistasTMDB.length}</strong><small>PELÍCULAS VISTAS</small></article>
                       <article><span>📺</span><strong>{vistasSeriesTMDB.length}</strong><small>SERIES VISTAS</small></article>
                       <article><span>▶</span><strong>{episodiosTotales}</strong><small>EPISODIOS VISTOS</small></article>
-                      <article><span>♥</span><strong>{favoritasTMDB.length + favoritasSeriesTMDB.length}</strong><small>FAVORITOS</small></article>
+                      <article><span>⏳</span><strong>{pendientesTMDB.length + pendientesSeriesTMDB.length}</strong><small>PENDIENTES</small></article>
                       <article><span>◷</span><strong>{formatearTiempo}</strong><small>TIEMPO VISTO</small></article>
                     </section>
 
@@ -5798,7 +5991,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                                     {index < 3 && <span className="wgx-friend-rank">{index === 0 ? '♛' : index + 1}</span>}
                                     <span className="wgx-my-friend-avatar"><AvatarVisual value={amigo.avatar} /></span>
                                     <strong>{amigo.name}</strong>
-                                    <span className="wgx-friend-mini-stats"><i>🎬 {amigo.movies}</i><i>📺 {amigo.series}</i><i>♥ {amigo.favorites}</i></span>
+                                    <span className="wgx-friend-mini-stats"><i>🎬 {amigo.movies}</i><i>📺 {amigo.series}</i><i>⏳ {amigo.favorites}</i></span>
                                     <span className="wgx-friend-level"><b>NIVEL {nivel}</b><em>→</em></span>
                                     <span className="wgx-friend-progress"><i style={{ width: `${progreso}%` }} /></span>
                                   </button>
@@ -5869,7 +6062,7 @@ const cambiarVistaTMDB = async (pelicula: TmdbMovie) => {
                         <div className="wgx-profile-avatar-wrap">
 <div className="wgx-profile-avatar-ring r1"/>
 <div className="wgx-profile-avatar-ring r2"/>
-<div className="wgx-profile-avatar">{amigoSeleccionado.avatar}</div>
+<div className="wgx-profile-avatar"><AvatarVisual value={amigoSeleccionado.avatar} className="wgx-profile-avatar-image" /></div>
 <span className="wgx-profile-online">● ONLINE</span>
 </div>
                         <div className="wgx-profile-identity-copy">
